@@ -56,7 +56,7 @@ claude plugin uninstall prompt-queue@prompt-queue
 
 A parked slash command runs through `$.command.run`, so it reaches the same command, arguments and hooks as typing it. A command that starts no turn lets the next entry go by itself.
 
-If an entry cannot be sent, it stays in the queue: auto entries return to the front and auto turns off with a toast; a manual run puts it back where it was. `/queue-auto` resumes.
+If a prompt cannot be sent, it stays in the queue: auto entries return to the front and auto turns off with a toast; a manual run puts it back where it was. `/queue-auto` resumes. A slash command that cannot run (an unknown name, a command that fails) is removed with a toast instead, so it does not block the entries behind it.
 
 Above the prompt, each queued entry shows on its own soft amber line, as `#1 <text>` (first 5, then `+N more`). In auto mode a dim line below them shows the state, for example `auto · waiting on 1 bg`. Other mods can add to the same row.
 
