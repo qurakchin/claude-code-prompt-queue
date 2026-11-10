@@ -49,10 +49,11 @@ claude plugin uninstall prompt-queue@prompt-queue
 | `/queue drop <n>` | Remove entry n. |
 | `/queue clear` | Remove all entries. |
 | `/queue-run [n]` | Send the next entry now (or entry n). Same as `/queue run`. |
-| `/queue-auto` | Toggle auto mode. |
+| `/queue auto` | Toggle auto mode. With the default setting the choice lasts for this session. |
+| `/queue-auto` | The same toggle, under its old name. |
 | `/queue unblock` | Stop waiting on background jobs. |
 
-**Auto mode** is off by default. When on, the next entry starts only after the current task ends **and** every background job or agent it started has finished. Then the next, until the queue is empty. Auto stays on until you toggle it off. Pressing Esc turns it off.
+**Auto mode** is off by default. When on, the next entry starts only after the current task ends **and** every background job or agent it started has finished. Then the next, until the queue is empty. Auto stays on until you toggle it off. Pressing Esc turns it off too. Whether `/queue auto`'s choice lasts past the session is up to the **Auto mode** setting.
 
 A parked slash command runs through `$.command.run`, so it reaches the same command, arguments and hooks as typing it. The next entry waits until that command's turn has started, or a short while if it starts none.
 
@@ -67,6 +68,21 @@ Above the prompt, each queued entry shows on its own soft amber line, as `#1 <te
 The queue belongs to the current session.
 
 If auto keeps waiting on a job that already ended (for example one a subagent started), run `/queue unblock`.
+
+## Settings
+
+The plugin's fields are rows in `/config`, under **Auto mode**.
+
+**Auto mode** sets auto's starting state and where `/queue auto` saves the toggle:
+
+| Value | Starts | `/queue auto` writes the setting |
+| --- | --- | --- |
+| `global-true` | on | yes |
+| `global-false` | off | yes |
+| `session-true` | on | no, this session only |
+| `session-false` (default) | off | no, this session only |
+
+The default keeps auto off and the toggle in this session, as before the setting existed. The setting is read once when a session starts; a reload keeps the value you toggled in that session, and a new session reads the setting again.
 
 ## Example
 
