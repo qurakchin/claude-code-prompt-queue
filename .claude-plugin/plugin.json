@@ -1,6 +1,6 @@
 {
   "name": "prompt-queue",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Queue prompts and slash commands with /queue while Claude works, then run them one by one after each task and its background jobs finish. Auto is on by default.",
   "author": { "name": "Zdeno Kuzmany", "url": "https://github.com/kuzmany" },
   "homepage": "https://github.com/qurakchin/claude-code-prompt-queue",

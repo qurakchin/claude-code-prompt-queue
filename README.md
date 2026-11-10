@@ -74,7 +74,9 @@ If you already installed the upstream plugin as `prompt-queue@prompt-queue`, rem
 2. /review-pr 123
 ```
 
-A parked slash command runs through `$.command.run`, so it reaches the same command, arguments and hooks as typing it. A command that starts no turn lets the next entry go by itself.
+A parked slash command runs through `$.command.run`, so it reaches the same command, arguments and hooks as typing it. The next entry waits until that command's turn has started, or a short while if it starts none.
+
+Text that starts with `/` but names no command (`/Users/me/x.md look at this`) is refused when you queue it: a prompt cannot start with `/`, and no such command exists.
 
 If a prompt cannot be sent, it stays in the queue: auto entries return to the front and auto turns off with a toast; a manual run puts it back where it was. `/queue auto` resumes. A slash command that cannot run (an unknown name, a command that fails) is removed with a toast instead, so it does not block the entries behind it.
 
@@ -99,7 +101,7 @@ The plugin's fields are rows in `/config`, under **Auto mode** and **Subcommand 
 | `session-true` | on | no, this session only |
 | `session-false` | off | no, this session only |
 
-The setting is read once when the session starts; a reload keeps the value you toggled in that session.
+The setting is read once when a session starts; a reload keeps the value you toggled in that session, and a new session reads the setting again.
 
 **Subcommand aliases** adds other spellings for the subcommands, as comma-separated `sub=alias` pairs. A bare word adds another `/queue` subcommand; a leading `/` registers a top-level command:
 
@@ -108,6 +110,8 @@ list=ls, status=/qs, auto=/queue-auto
 ```
 
 With that, `/queue ls`, `/qs` and `/queue-auto` all work. `/queue-auto` is not a command unless you alias it, and `/queue auto` is the default spelling.
+
+An alias whose name is already taken (`/config`, another plugin's command) says so once and stays off for the session.
 
 Aliases show in `/queue help`.
 
