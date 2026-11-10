@@ -308,6 +308,35 @@ test('a failed send keeps the prompt and stops auto', { options: { autoMode: 'se
   expect(sent).toEqual(['a'])
 })
 
+test('a prompt a hook drops stays in the queue and stops auto', { options: { autoMode: 'session-true' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const toasts: string[] = []
+  const sent: string[] = []
+  let dropped = true
+  on('ui.toast', ($: any, e: any) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('prompt.submit', ($, e) => {
+    if (dropped) return { drop: 'blocked by policy' }
+    sent.push(e.text)
+    return { text: e.text }
+  })
+
+  await start($, on)
+  await $.command.run({ command: 'queue', args: 'a' })
+  await clock.advance(1)
+  // A drop starts no turn, so the send has to clear its own flags.
+  expect(toasts).toEqual(['Queue paused: could not send "a": blocked by policy. /queue auto resumes.'])
+  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('1. a')
+
+  dropped = false
+  await $.command.run({ command: 'queue', args: 'auto' })
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('Queue is empty.')
+})
+
 test('a command that cannot run leaves the queue and the next prompt goes', async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
@@ -422,6 +451,41 @@ test('a global toggle sends what is parked once the choice is saved', async ($, 
 
   // The write comes first, then the send; a reload that follows finds busy set.
   expect(saved).toEqual(['prompt-queue.autoMode=global-false', 'prompt-queue.autoMode=global-true'])
+  expect(sent).toEqual(['a'])
+})
+
+test('a setting that cannot be saved leaves the toggle to the session', async ($, on) => {
+  const clock = mock.clock(on)
+  const toasts: string[] = []
+  const sent: string[] = []
+  let how: 'throw' | 'deny' = 'throw'
+  on('ui.toast', ($: any, e: any) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('config.set', () => {
+    if (how === 'throw') throw new Error('not saved')
+    return { deny: 'locked' }
+  })
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+
+  await start($, on)
+  const off = await $.command.run({ command: 'queue', args: 'auto' })
+  expect(off.text).toBe('Queue auto is off (global).')
+
+  await $.command.run({ command: 'queue', args: 'a' })
+  how = 'deny'
+  const back = await $.command.run({ command: 'queue', args: 'auto' })
+  expect(back.text).toBe('Queue auto is on (global).')
+  expect(toasts).toEqual([
+    'Auto changed for this session only: the setting could not be saved.',
+    'Auto changed for this session only: the setting could not be saved.',
+  ])
+  // A denied write saved nothing, so this send is the only one on its way.
+  await clock.advance(1)
   expect(sent).toEqual(['a'])
 })
 
@@ -547,5 +611,30 @@ test('panel edits, reorders, runs and removes; state shows above the prompt', { 
   await ui.input({ key: 'edit-0', text: '' })
   expect(await list()).toBe('1. d')
   expect(await band(/^1 queued: d/)).toBe(true)
+  await ui.unmount()
+})
+
+test('the panel refuses a leading slash that names no command', { options: { autoMode: 'session-false' } }, async ($, on) => {
+  const toasts: string[] = []
+  on('ui.toast', ($: any, e: any) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await start($, on)
+  await $.command.run({ command: 'queue', args: 'keep' })
+  await $.command.run({ command: 'queue', args: '' })
+  const ui = await $.ui.mount({ plugin: 'prompt-queue', surface: 'terminal', component: 'Pane', requestId: 'queue',
+    props: { title: 'Queue', isFocused: true, bodyColumns: 100, placement: 'dock' } } as any)
+  const list = async () => (await $.command.run({ command: 'queue', args: 'list' })).text
+  const refused = '/Users/me/x.md is not a command name, and a prompt cannot start with "/".'
+
+  await ui.input({ key: 'new', text: '/Users/me/x.md look at this' })
+  expect(toasts).toEqual([refused])
+  expect(await list()).toBe('1. keep')
+
+  await ui.input({ key: 'edit-0', text: '/Users/me/x.md' })
+  expect(toasts).toEqual([refused, refused])
+  expect(await list()).toBe('1. keep')
   await ui.unmount()
 })
