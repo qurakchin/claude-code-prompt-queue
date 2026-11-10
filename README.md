@@ -11,7 +11,7 @@ This is a fork of [kuzmany/claude-code-prompt-queue](https://github.com/kuzmany/
 - **Settings.** Auto's starting state and whether the toggle is saved for later sessions live in `/config`; subcommands can be aliased, `/queue-auto` among them.
 - **`/queue status`.** Print the queue state without opening the panel.
 
-It also keeps an entry that could not be sent instead of dropping it, and stops auto with a toast so the queue does not silently lose it.
+It also keeps a prompt that could not be sent instead of dropping it, and stops auto with a toast so the queue does not silently lose it; a command that cannot run is dropped with a toast so the entries behind it still go.
 
 ## Install
 
@@ -76,7 +76,7 @@ If you already installed the upstream plugin as `prompt-queue@prompt-queue`, rem
 
 A parked slash command runs through `$.command.run`, so it reaches the same command, arguments and hooks as typing it. A command that starts no turn lets the next entry go by itself.
 
-If an entry cannot be sent, it stays in the queue: auto entries return to the front and auto turns off with a toast; a manual run puts it back where it was. `/queue auto` resumes.
+If a prompt cannot be sent, it stays in the queue: auto entries return to the front and auto turns off with a toast; a manual run puts it back where it was. `/queue auto` resumes. A slash command that cannot run (an unknown name, a command that fails) is removed with a toast instead, so it does not block the entries behind it.
 
 A dim line above the prompt shows the state, for example `3 queued: /review-pr 12 · auto · waiting on 1 bg`. Other mods can add to the same row.
 
@@ -128,7 +128,7 @@ Claude finishes the test run, then fixes the tests, then reviews the PR, then up
 | --- | --- | --- |
 | Auto | Off by default, `/queue-auto` each session | On by default, `/queue auto`, saved per the setting |
 | Entries | Prompts only | Prompts and slash commands |
-| Failed send | Entry removed, auto stays on | Entry kept, auto turns off with a toast |
+| Failed send | Entry removed, auto stays on | Prompt kept, auto off with a toast; command dropped with a toast |
 | State | Panel only | Panel, `/queue status` and the band above the prompt |
 | Spellings | Fixed | Subcommand aliases in settings, `/queue-auto` among them |
 
