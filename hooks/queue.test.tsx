@@ -378,6 +378,21 @@ test('aliases move subcommands to /queue words or top-level commands', { options
   expect(sent).toEqual(['one'])
 })
 
+test('commands carry the argument hint the typeahead shows', { options: { aliases: 'auto=/queue-auto, run=/qr' } }, async ($, on) => {
+  const hints: Record<string, string | undefined> = {}
+  on('command.register', (_: any, e: any) => {
+    hints[e.name] = e.argumentHint
+    return { value: e.name }
+  })
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  expect(hints.queue).toBe('[text | /command | help|list|status|run|drop|clear|unblock|auto]')
+  // A toggle takes no argument, so it shows no hint.
+  expect(hints['queue-auto']).toBeUndefined()
+  expect(hints.qr).toBe('[n]')
+})
+
 test('status prints the queue without the panel', { options: { autoMode: 'session-false' } }, async ($, on) => {
   await start($, on)
   for (const t of ['a', '/review-pr 2']) await $.command.run({ command: 'queue', args: t })

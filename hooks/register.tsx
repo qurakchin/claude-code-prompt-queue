@@ -41,6 +41,11 @@ const DESCRIPTIONS: Record<Sub, string> = {
   auto: 'Toggle running the queue after each task and its background jobs end',
 }
 
+// The hint the typeahead and the input box draw dim after the command name.
+const ARGUMENTS = `[text | /command | ${SUBCOMMANDS.join('|')}]`
+// A top-level alias takes the arguments of the subcommand it stands for.
+const HINTS: Partial<Record<Sub, string>> = { run: '[n]', drop: '[n]' }
+
 const HELP = `/queue            open the panel: edit, reorder, run, remove
 /queue <text>     park a prompt
 /queue /cmd ...   park a slash command to run as if typed
@@ -276,11 +281,18 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'queue',
       description: 'Park a prompt or command, and run the queue after each task (help, list, status, run, drop, clear, unblock, auto)',
+      argumentHint: ARGUMENTS,
       immediate: true,
     })
     for (const [name, sub] of aliases.commands) {
+      const argumentHint = HINTS[sub]
       try {
-        await $.command.register({ name, description: DESCRIPTIONS[sub], immediate: true })
+        await $.command.register({
+          name,
+          description: DESCRIPTIONS[sub],
+          ...(argumentHint ? { argumentHint } : {}),
+          immediate: true,
+        })
       } catch {
         // A name another plugin or Claude Code already uses stays theirs.
       }
