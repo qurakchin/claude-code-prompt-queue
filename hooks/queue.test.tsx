@@ -1,5 +1,13 @@
 import { test, expect, mock } from 'claude-code/testing'
 
+// A test registers its hooks before its first call on $, which loads the plugin:
+// these two stand for the engine beneath it, and raise the session's start.
+const start = async ($: any, on: any) => {
+  on('command.register', (_: any, e: any) => ({ value: e.name }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+}
+
 test('auto is on from the start and sends a prompt queued while idle', async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
@@ -8,12 +16,29 @@ test('auto is on from the start and sends a prompt queued while idle', async ($,
     return { text: e.text }
   })
 
+  await start($, on)
   await $.command.run({ command: 'queue', args: 'go' })
   await clock.advance(1)
   expect(sent).toEqual(['go'])
 })
 
-test('parks prompts and sends one on run', async ($, on) => {
+test('session-false starts with auto off', { options: { autoMode: 'session-false' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const sent: string[] = []
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+
+  await start($, on)
+  await $.command.run({ command: 'queue', args: 'go' })
+  await clock.advance(1)
+  expect(sent).toEqual([])
+  const list = await $.command.run({ command: 'queue', args: 'list' })
+  expect(list.text).toBe('1. go')
+})
+
+test('parks prompts and sends one on run', { options: { autoMode: 'session-false' } }, async ($, on) => {
   const sent: string[] = []
   const clock = mock.clock(on)
   on('prompt.submit', ($, e) => {
@@ -21,7 +46,7 @@ test('parks prompts and sends one on run', async ($, on) => {
     return { text: e.text }
   })
 
-  await $.command.run({ command: 'queue-auto', args: '' })
+  await start($, on)
   await $.command.run({ command: 'queue', args: 'first task' })
   await $.command.run({ command: 'queue', args: 'second task' })
   expect(sent).toEqual([])
@@ -57,6 +82,7 @@ test('a leading slash parks a command and runs it as a command', async ($, on) =
     return { text: 'reviewed' }
   })
 
+  await start($, on)
   await $.command.run({ command: 'queue', args: '/review-pr 123' })
   await clock.advance(1)
   expect(ran).toEqual(['123'])
@@ -83,6 +109,7 @@ test('a command that starts no turn lets the queue move on', async ($, on) => {
     return { text: 'pong' }
   })
 
+  await start($, on)
   await $.turn.start({ turnId: 't' } as never)
   await $.command.run({ command: 'queue', args: '/ping' })
   await $.command.run({ command: 'queue', args: '/ping' })
@@ -92,7 +119,7 @@ test('a command that starts no turn lets the queue move on', async ($, on) => {
   expect(ran).toEqual(['ping', 'ping'])
 })
 
-test('auto sends all prompts one by one and stays on', async ($, on) => {
+test('auto sends all prompts one by one and stays on', { options: { autoMode: 'session-false' } }, async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
   on('ui.toast', () => ({ value: undefined }))
@@ -104,9 +131,10 @@ test('auto sends all prompts one by one and stays on', async ($, on) => {
   const endTurn = () =>
     $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
 
-  await $.command.run({ command: 'queue-auto', args: '' })
+  await start($, on)
   for (const t of ['a', 'b', 'c']) await $.command.run({ command: 'queue', args: t })
-  await $.command.run({ command: 'queue-auto', args: '' })
+  const toggled = await $.command.run({ command: 'queue', args: 'auto' })
+  expect(toggled.text).toBe('Queue auto is on (session).')
   await clock.advance(1)
   expect(sent).toEqual(['a'])
 
@@ -124,7 +152,7 @@ test('auto sends all prompts one by one and stays on', async ($, on) => {
   expect(sent).toEqual(['a', 'b', 'c', 'd'])
 })
 
-test('toggling auto on mid-task waits for the task to end', async ($, on) => {
+test('toggling auto on mid-task waits for the task to end', { options: { autoMode: 'session-false' } }, async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -134,10 +162,10 @@ test('toggling auto on mid-task waits for the task to end', async ($, on) => {
     return { text: e.text }
   })
 
-  await $.command.run({ command: 'queue-auto', args: '' })
+  await start($, on)
   await $.turn.start({ turnId: 't' } as never)
   await $.command.run({ command: 'queue', args: 'a' })
-  await $.command.run({ command: 'queue-auto', args: '' })
+  await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
   expect(sent).toEqual([])
 
@@ -145,11 +173,11 @@ test('toggling auto on mid-task waits for the task to end', async ($, on) => {
   await clock.advance(1)
   expect(sent).toEqual(['a'])
 
-  const off = await $.command.run({ command: 'queue-auto', args: '' })
-  expect(off.text).toBe('Queue auto is off.')
+  const off = await $.command.run({ command: 'queue', args: 'auto' })
+  expect(off.text).toBe('Queue auto is off (session).')
 })
 
-test('auto waits for background jobs before the next prompt', async ($, on) => {
+test('auto waits for background jobs before the next prompt', { options: { autoMode: 'session-false' } }, async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
   on('ui.toast', () => ({ value: undefined }))
@@ -165,9 +193,9 @@ test('auto waits for background jobs before the next prompt', async ($, on) => {
   const endTurn = () =>
     $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
 
-  await $.command.run({ command: 'queue-auto', args: '' })
+  await start($, on)
   for (const t of ['a', 'b']) await $.command.run({ command: 'queue', args: t })
-  await $.command.run({ command: 'queue-auto', args: '' })
+  await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
   expect(sent).toEqual(['a'])
 
@@ -198,6 +226,7 @@ test('tool output that only quotes job words is not a job', async ($, on) => {
     return { text: e.text }
   })
 
+  await start($, on)
   await $.tool.call({ tool: 'Bash', command: 'cat notes.txt' })
   await $.command.run({ command: 'queue', args: 'a' })
   await clock.advance(1)
@@ -214,13 +243,14 @@ test('a prompt queued mid-task waits for the task to end', async ($, on) => {
     return { text: e.text }
   })
 
+  await start($, on)
   await $.turn.start({ turnId: 't' } as never)
   await $.command.run({ command: 'queue', args: 'a' })
   await clock.advance(1)
   expect(sent).toEqual([])
 })
 
-test('a failed send keeps the prompt and stops auto', async ($, on) => {
+test('a failed send keeps the prompt and stops auto', { options: { autoMode: 'session-true' } }, async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
   let refuse = true
@@ -232,6 +262,7 @@ test('a failed send keeps the prompt and stops auto', async ($, on) => {
     return { text: e.text }
   })
 
+  await start($, on)
   await $.command.run({ command: 'queue', args: 'a' })
   await clock.advance(1)
   const kept = await $.command.run({ command: 'queue', args: 'list' })
@@ -239,12 +270,12 @@ test('a failed send keeps the prompt and stops auto', async ($, on) => {
 
   // Auto stopped on its own; turning it back on sends what was kept.
   refuse = false
-  await $.command.run({ command: 'queue-auto', args: '' })
+  await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
   expect(sent).toEqual(['a'])
 })
 
-test('auto clears agents whose end arrives in another session message', async ($, on) => {
+test('auto clears agents whose end arrives in another session message', { options: { autoMode: 'session-false' } }, async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
   let agent = 0
@@ -258,11 +289,11 @@ test('auto clears agents whose end arrives in another session message', async ($
   const endTurn = () =>
     $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
 
-  await $.command.run({ command: 'queue-auto', args: '' })
+  await start($, on)
   await $.command.run({ command: 'queue', args: 'next' })
   await $.tool.call({ tool: 'Agent', prompt: 'review', description: 'one' })
   await $.tool.call({ tool: 'Agent', prompt: 'review', description: 'two' })
-  await $.command.run({ command: 'queue-auto', args: '' })
+  await $.command.run({ command: 'queue', args: 'auto' })
   await endTurn()
   await clock.advance(1)
   expect(sent).toEqual([])
@@ -281,7 +312,80 @@ test('auto clears agents whose end arrives in another session message', async ($
   expect(sent.at(-1)).toBe('next')
 })
 
-test('panel edits, reorders, runs and removes; state shows above the prompt', async ($, on) => {
+test('global auto writes the choice back to settings', async ($, on) => {
+  const saved: string[] = []
+  on('ui.toast', () => ({ value: undefined }))
+  on('config.set', ($, e) => {
+    saved.push(`${e.key}=${e.value}`)
+    return { value: e.value }
+  })
+
+  await start($, on)
+  const off = await $.command.run({ command: 'queue', args: 'auto' })
+  expect(off.text).toBe('Queue auto is off (global).')
+  expect(saved).toEqual(['prompt-queue.autoMode=global-false'])
+
+  const back = await $.command.run({ command: 'queue', args: 'auto' })
+  expect(back.text).toBe('Queue auto is on (global).')
+  expect(saved).toEqual(['prompt-queue.autoMode=global-false', 'prompt-queue.autoMode=global-true'])
+})
+
+test('a global toggle leaves the parked entry for the reload to send', async ($, on) => {
+  const saved: string[] = []
+  const sent: string[] = []
+  on('config.set', ($, e) => {
+    saved.push(`${e.key}=${e.value}`)
+    return { value: e.value }
+  })
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  await start($, on)
+
+  await $.command.run({ command: 'queue', args: 'auto' })
+  await $.command.run({ command: 'queue', args: 'a' })
+  await $.command.run({ command: 'queue', args: 'auto' })
+
+  // The write comes first; the reload it causes runs session.start, which sends.
+  expect(saved).toEqual(['prompt-queue.autoMode=global-false', 'prompt-queue.autoMode=global-true'])
+  expect(sent).toEqual([])
+  const list = await $.command.run({ command: 'queue', args: 'list' })
+  expect(list.text).toBe('1. a')
+})
+
+test('aliases move subcommands to /queue words or top-level commands', { options: { autoMode: 'session-false', aliases: 'auto=/queue-auto, list=ls, status=/qs' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const sent: string[] = []
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+
+  await start($, on)
+  await $.command.run({ command: 'queue', args: 'one' })
+  const listed = await $.command.run({ command: 'queue', args: 'ls' })
+  expect(listed.text).toBe('1. one')
+
+  const status = await $.command.run({ command: 'qs', args: '' })
+  expect(status.text).toBe('1 queued · auto off (session)\n1. one')
+
+  // The top-level alias toggles auto on, which sends what is parked.
+  const toggled = await $.command.run({ command: 'queue-auto', args: '' })
+  expect(toggled.text).toBe('Queue auto is on (session).')
+  await clock.advance(1)
+  expect(sent).toEqual(['one'])
+})
+
+test('status prints the queue without the panel', { options: { autoMode: 'session-false' } }, async ($, on) => {
+  await start($, on)
+  for (const t of ['a', '/review-pr 2']) await $.command.run({ command: 'queue', args: t })
+  const status = await $.command.run({ command: 'queue', args: 'status' })
+  expect(status.text).toBe('2 queued · auto off (session)\n1. a\n2. /review-pr 2')
+})
+
+test('panel edits, reorders, runs and removes; state shows above the prompt', { options: { autoMode: 'session-false' } }, async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -299,9 +403,9 @@ test('panel edits, reorders, runs and removes; state shows above the prompt', as
     await h.unmount()
     return !!found
   }
+  await start($, on)
   const list = async () => (await $.command.run({ command: 'queue', args: 'list' })).text
 
-  await $.command.run({ command: 'queue-auto', args: '' })
   expect(await band(/queued/)).toBe(false)
   for (const t of ['a', 'b', 'c']) await $.command.run({ command: 'queue', args: t })
   expect((await $.command.run({ command: 'queue', args: '' })).text).toBe('Queue panel opened.')

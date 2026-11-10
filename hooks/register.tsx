@@ -4,8 +4,9 @@ import type { Engine, Register } from 'claude-code'
 import type { QueueItem } from '../types'
 
 const items = atom({ plugin: 'prompt-queue', key: 'items' } as const, [], { shape: 'items-2' })
-// On from the start: a parked prompt is what the person wants run, not a mode to find first.
 const auto = atom({ plugin: 'prompt-queue', key: 'auto' } as const, true)
+// Whether this session read the auto setting in; a reload keeps the toggle's choice.
+const initialized = atom({ plugin: 'prompt-queue', key: 'initialized' } as const, false)
 // Ids of background tasks and agents the main session started and still waits on.
 const waiting = atom({ plugin: 'prompt-queue', key: 'waiting' } as const, [])
 // Whether a main-loop turn is running; kept in state so a reload mid-turn remembers it.
@@ -24,15 +25,66 @@ const NOTICE_ORIGINS = ['task-notification', 'peer']
 
 const PANE = 'queue'
 
+const SUBCOMMANDS = ['help', 'list', 'status', 'run', 'drop', 'clear', 'unblock', 'auto'] as const
+type Sub = (typeof SUBCOMMANDS)[number]
+
+const isSub = (word: string): word is Sub => (SUBCOMMANDS as readonly string[]).includes(word)
+
+const DESCRIPTIONS: Record<Sub, string> = {
+  help: 'List the queue commands',
+  list: 'Show parked entries',
+  status: 'Print the queue without opening the panel',
+  run: 'Send entry n now (default 1)',
+  drop: 'Remove entry n',
+  clear: 'Remove all entries',
+  unblock: 'Stop waiting on background jobs',
+  auto: 'Toggle running the queue after each task and its background jobs end',
+}
+
 const HELP = `/queue            open the panel: edit, reorder, run, remove
 /queue <text>     park a prompt
 /queue /cmd ...   park a slash command to run as if typed
-/queue list       show parked prompts
-/queue run [n]    send prompt n now (default 1)
-/queue drop <n>   remove prompt n
-/queue clear      remove all
+/queue help       list these commands
+/queue list       show parked entries
+/queue status     print the queue without the panel
+/queue run [n]    send entry n now (default 1)
+/queue drop <n>   remove entry n
+/queue clear      remove all entries
 /queue unblock    stop waiting on background jobs
-/queue-auto       toggle: run the queue after each task and its background jobs end (on by default)`
+/queue auto       toggle: run the queue after each task and its background jobs end`
+
+type Scope = 'global' | 'session'
+type AutoMode = { scope: Scope; value: boolean }
+type Aliases = { words: Map<string, Sub>; commands: Map<string, Sub> }
+
+// The settings value names both the initial state and who keeps the toggle's choice.
+const readAutoMode = (raw: unknown): AutoMode => {
+  const text = String(raw ?? 'global-true')
+  return { scope: text.startsWith('session-') ? 'session' : 'global', value: !text.endsWith('false') }
+}
+
+// `list=ls` adds /queue ls; `auto=/queue-auto` registers /queue-auto. Commas or newlines split.
+const readAliases = (raw: unknown): Aliases => {
+  const words = new Map<string, Sub>()
+  const commands = new Map<string, Sub>()
+  for (const entry of String(raw ?? '').split(/[,\n]+/)) {
+    const found = entry.trim().match(/^([a-z]+)\s*=\s*(\S+)$/)
+    if (!found) continue
+    const sub = found[1]!
+    if (!isSub(sub)) continue
+    const alias = found[2]!
+    if (alias.startsWith('/')) {
+      const name = alias.slice(1)
+      if (name !== 'queue' && /^[A-Za-z0-9_-]+$/.test(name)) commands.set(name, sub)
+    } else if (/^[A-Za-z0-9_-]+$/.test(alias)) {
+      words.set(alias, sub)
+    }
+  }
+  return { words, commands }
+}
+
+let autoMode: AutoMode = readAutoMode(undefined)
+let aliases: Aliases = readAliases('')
 
 // A leading slash parks a slash command rather than text for the model.
 const COMMAND = /^\/(\S+)(?:\s+([\s\S]*))?$/
@@ -63,6 +115,22 @@ const stateText = async ($: Engine) => {
   return [count && `${count} queued: ${peek(textOf(list[0]!))}`, isAuto && 'auto', isAuto && count && jobs && `waiting on ${jobs} bg`]
     .filter(Boolean)
     .join(' · ')
+}
+
+// The panel's content as text, with no editing or buttons.
+const statusText = async ($: Engine) => {
+  const [list, isAuto, jobs] = await Promise.all([read($, items), read($, auto), read($, waiting)])
+  const head = `${list.length ? `${list.length} queued` : 'Queue is empty'} · auto ${isAuto ? 'on' : 'off'} (${autoMode.scope})`
+  const waitingOn = jobs.length ? `waiting on ${jobs.length} background job(s): ${jobs.join(', ')}` : ''
+  return [head, waitingOn, ...list.map((item, i) => `${i + 1}. ${textOf(item)}`)].filter(Boolean).join('\n')
+}
+
+const helpText = () => {
+  const lines = [
+    ...[...aliases.words].map(([word, sub]) => `/queue ${word}`.padEnd(17) + sub),
+    ...[...aliases.commands].map(([name, sub]) => `/${name}`.padEnd(17) + sub),
+  ]
+  return lines.length ? `${HELP}\n\nAliases:\n${lines.join('\n')}` : HELP
 }
 
 const move = ($: Engine, i: number, by: -1 | 1) =>
@@ -115,7 +183,7 @@ const sendIfIdle = async ($: Engine) => {
     // Keep what could not be sent, at the front, and stop trying on its own.
     await update($, items, list => [first, ...list])
     await update($, auto, () => false)
-    $.ui.toast(`Queue paused: could not send "${peek(textOf(first))}". /queue-auto resumes.`)
+    $.ui.toast(`Queue paused: could not send "${peek(textOf(first))}". /queue auto resumes.`)
   })
 }
 
@@ -135,21 +203,101 @@ const runAt = async ($: Engine, i: number, item: QueueItem) => {
   })
 }
 
-export const register: Register = on => {
+// `global-*` keeps the toggle in settings; `session-*` leaves settings alone.
+const toggleAuto = async ($: Engine) => {
+  const isOn = !(await read($, auto))
+  await update($, auto, () => isOn)
+  const text = `Queue auto is ${isOn ? 'on' : 'off'} (${autoMode.scope}).`
+
+  if (autoMode.scope === 'session') {
+    if (isOn) await sendIfIdle($)
+    return { text }
+  }
+
+  try {
+    const saved = await $.config.set({
+      key: 'prompt-queue.autoMode',
+      value: isOn ? 'global-true' : 'global-false',
+    })
+    // The write reloads the module and drops this hook's timers; the send goes
+    // after the write, and the reload's session.start makes it.
+    if (!saved.deny) return { text }
+  } catch {
+    // The write failed; the toggle still stands for this session.
+  }
+
+  $.ui.toast('Auto changed for this session only: the setting could not be saved.')
+  if (isOn) await sendIfIdle($)
+  return { text }
+}
+
+const runSub = async ($: Engine, sub: Sub, arg: string): Promise<{ text: string }> => {
+  if (sub === 'help') return { text: helpText() }
+  if (sub === 'status') return { text: await statusText($) }
+  if (sub === 'auto') return toggleAuto($)
+
+  const list = await read($, items)
+
+  if (sub === 'list') {
+    return { text: list.map((item, i) => `${i + 1}. ${textOf(item)}`).join('\n') || 'Queue is empty.' }
+  }
+
+  if (sub === 'clear') {
+    await update($, items, () => [])
+    return { text: `Cleared ${list.length} prompt(s).` }
+  }
+
+  if (sub === 'unblock') {
+    await update($, waiting, () => [])
+    await sendIfIdle($)
+    return { text: 'Stopped waiting on background jobs.' }
+  }
+
+  const n = Number(arg || '1')
+  const i = Number.isInteger(n) && n >= 1 && n <= list.length ? n - 1 : -1
+  if (i < 0) return { text: `No prompt ${arg || '1'}. Queue has ${list.length}.` }
+
+  const item = list[i]!
+  await (sub === 'run' ? runAt($, i, item) : removeAt($, i))
+  return { text: `${sub === 'run' ? 'Sending' : 'Dropped'}: ${textOf(item)}` }
+}
+
+export const register: Register = (on, options) => {
+  autoMode = readAutoMode(options.autoMode)
+  aliases = readAliases(options.aliases)
+
   on('session.start', async ($, e, next) => {
+    // Read the setting once per session; a reload keeps what a toggle stored.
+    if (!(await read($, initialized))) {
+      await update($, auto, () => autoMode.value)
+      await update($, initialized, () => true)
+    }
+
     await $.command.register({
       name: 'queue',
-      description: 'Park a prompt to run later (list, run, drop, clear)',
+      description: 'Park a prompt or command, and run the queue after each task (help, list, status, run, drop, clear, unblock, auto)',
       immediate: true,
     })
-    await $.command.register({
-      name: 'queue-auto',
-      description: 'Toggle running the queue after each task and its background jobs end',
-      immediate: true,
-    })
+    for (const [name, sub] of aliases.commands) {
+      try {
+        await $.command.register({ name, description: DESCRIPTIONS[sub], immediate: true })
+      } catch {
+        // A name another plugin or Claude Code already uses stays theirs.
+      }
+    }
+
+    // A reload after saving a global choice re-runs this; the send it dropped goes here.
+    await sendIfIdle($)
 
     return next(e)
   })
+
+  for (const [name, sub] of aliases.commands) {
+    on('command.run', { command: name }, async ($, e) => {
+      const [first] = e.args.trim().split(/\s+/)
+      return runSub($, sub, first ?? '')
+    })
+  }
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
@@ -189,7 +337,7 @@ export const register: Register = on => {
     // parked there is nothing to stop, so an idle queue stays on.
     if (e.isAborted && (await read($, auto)) && (await read($, items)).length) {
       await update($, auto, () => false)
-      $.ui.toast('Queue auto is off. /queue-auto turns it back on.')
+      $.ui.toast('Queue auto is off. /queue auto turns it back on.')
     } else {
       await sendIfIdle($)
     }
@@ -197,53 +345,25 @@ export const register: Register = on => {
     return ended
   })
 
-  on('command.run', { command: 'queue-auto' }, async $ => {
-    const isOn = !(await read($, auto))
-    await update($, auto, () => isOn)
-    if (!isOn) return { text: 'Queue auto is off.' }
-    await sendIfIdle($)
-
-    return { text: 'Queue auto is on: prompts run after each task and its background jobs end.' }
-  })
-
   on('command.run', { command: 'queue' }, async ($, e) => {
     const args = e.args.trim()
-    // A subcommand is matched only in its exact form, so "/queue list the files" is queued.
-    const found = args.match(/^(help|list|clear|unblock)$|^(run|drop)(?:\s+(\d+))?$/)
-    const word = found?.[1] ?? found?.[2]
-    const arg = found?.[3] ?? ''
-    if (word === 'help') return { text: HELP }
-
     if (args === '') {
       await $.ui.open({ id: PANE, title: 'Queue', focus: true, closeOnEscape: true })
       return { text: 'Queue panel opened.' }
     }
 
+    // A subcommand matches only in its own form, so "/queue list the files" is queued.
+    const [word = '', ...tail] = args.split(/\s+/)
+    const sub = aliases.words.get(word) ?? (isSub(word) ? word : undefined)
+    if (sub) {
+      const takesNumber = sub === 'run' || sub === 'drop'
+      const fits = takesNumber
+        ? tail.length <= 1 && (tail[0] === undefined || /^\d+$/.test(tail[0]))
+        : tail.length === 0
+      if (fits) return runSub($, sub, tail[0] ?? '')
+    }
+
     const list = await read($, items)
-    const n = Number(arg || '1')
-    const i = Number.isInteger(n) && n >= 1 && n <= list.length ? n - 1 : -1
-
-    if (word === 'list') {
-      return { text: list.map((item, j) => `${j + 1}. ${textOf(item)}`).join('\n') || 'Queue is empty.' }
-    }
-
-    if (word === 'clear') {
-      await update($, items, () => [])
-      return { text: `Cleared ${list.length} prompt(s).` }
-    }
-
-    if (word === 'unblock') {
-      await update($, waiting, () => [])
-      await sendIfIdle($)
-      return { text: 'Stopped waiting on background jobs.' }
-    }
-
-    if (word === 'drop' || word === 'run') {
-      if (i < 0) return { text: `No prompt ${arg || '1'}. Queue has ${list.length}.` }
-      await (word === 'run' ? runAt($, i, list[i]!) : removeAt($, i))
-      return { text: `${word === 'run' ? 'Sending' : 'Dropped'}: ${textOf(list[i]!)}` }
-    }
-
     await enqueue($, args)
 
     return { text: `Queued #${list.length + 1}.` }
