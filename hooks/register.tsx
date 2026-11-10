@@ -162,8 +162,10 @@ const SHOWN = 5
 const stateText = async ($: Engine) => {
   const [list, isAuto] = await Promise.all([read($, items), read($, auto)])
   const count = list.length
-  const jobs = isAuto && count ? (await read($, waiting)).length : 0
-  return [isAuto && 'auto', isAuto && count && jobs && `waiting on ${jobs} bg`]
+  // With nothing parked the band stays free for other mods, even while auto is on.
+  if (!count) return ''
+  const jobs = isAuto ? (await read($, waiting)).length : 0
+  return [isAuto && 'auto', isAuto && jobs && `waiting on ${jobs} bg`]
     .filter(Boolean)
     .join(' · ')
 }
