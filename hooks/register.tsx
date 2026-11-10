@@ -143,8 +143,11 @@ const peek = (text: string) => {
 const stateText = async ($: Engine) => {
   const [list, isAuto] = await Promise.all([read($, items), read($, auto)])
   const count = list.length
-  const jobs = isAuto && count ? (await read($, waiting)).length : 0
-  return [count && `${count} queued: ${peek(textOf(list[0]!))}`, isAuto && 'auto', isAuto && count && jobs && `waiting on ${jobs} bg`]
+  // With nothing parked there is no state to draw: auto alone would put a row
+  // and its `[-]` above the prompt in every session that leaves auto on.
+  if (!count) return ''
+  const jobs = isAuto ? (await read($, waiting)).length : 0
+  return [`${count} queued: ${peek(textOf(list[0]!))}`, isAuto && 'auto', jobs && `waiting on ${jobs} bg`]
     .filter(Boolean)
     .join(' · ')
 }

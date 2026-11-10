@@ -80,7 +80,7 @@ Text that starts with `/` but names no command (`/Users/me/x.md look at this`) i
 
 If a prompt cannot be sent, it stays in the queue: auto entries return to the front and auto turns off with a toast; a manual run puts it back where it was. `/queue auto` resumes. A slash command that cannot run (an unknown name, a command that fails) is removed with a toast instead, so it does not block the entries behind it.
 
-A dim line above the prompt shows the state, for example `3 queued: /review-pr 12 · auto · waiting on 1 bg`. Other mods can add to the same row.
+With entries parked, a dim line above the prompt shows the state, for example `3 queued: /review-pr 12 · auto · waiting on 1 bg`; with nothing parked it draws nothing. Other mods can add to the same row.
 
 `/queue help` lists the commands.
 

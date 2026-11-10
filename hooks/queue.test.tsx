@@ -614,7 +614,29 @@ test('panel edits, reorders, runs and removes; state shows above the prompt', { 
   await ui.unmount()
 })
 
-test('the panel refuses a leading slash that names no command', { options: { autoMode: 'session-false' } }, async ($, on) => {
+test('the band draws nothing while the queue is empty', async ($, on) => {
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>core</Text>
+  })
+  const band = async (text: RegExp) => {
+    const h = await $.ui.mount({ plugin: 'prompt-queue', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} } } as any)
+    const found = await h.find({ type: 'Text', text })
+    await h.unmount()
+    return !!found
+  }
+  await start($, on)
+  // Auto is on by default; alone it is not worth a row, or the `[-]` beside it.
+  expect(await band(/auto/)).toBe(false)
+  expect(await band(/core/)).toBe(true)
+
+  await $.turn.start({ turnId: 't' } as never)
+  await $.command.run({ command: 'queue', args: 'a' })
+  expect(await band(/^1 queued: a · auto/)).toBe(true)
+})
+
+test('the panel refuses a leading slash that names no command',{ options: { autoMode: 'session-false' } }, async ($, on) => {
   const toasts: string[] = []
   on('ui.toast', ($: any, e: any) => {
     toasts.push(e.text)
