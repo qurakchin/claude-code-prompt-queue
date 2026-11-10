@@ -1,19 +1,20 @@
 {
-  "name": "prompt-queue",
-  "description": "Prompt queue for Claude Code: park prompts and run them after each task.",
+  "name": "qurakchin-prompt-queue",
+  "description": "Prompt Queue for Claude Code: park prompts and slash commands, and run them after each task.",
   "owner": {
-    "name": "Zdeno Kuzmany",
-    "url": "https://github.com/kuzmany"
+    "name": "qurakchin",
+    "url": "https://github.com/qurakchin"
   },
   "plugins": [
     {
       "name": "prompt-queue",
       "source": "./",
-      "description": "Queue prompts with /queue and run them one by one after each task and its background jobs finish.",
+      "description": "Queue prompts and slash commands with /queue and run them one by one after each task and its background jobs finish. Auto is on by default.",
       "category": "productivity",
       "keywords": [
         "prompt-queue",
         "queue",
+        "slash-command",
         "automation",
         "productivity"
       ]

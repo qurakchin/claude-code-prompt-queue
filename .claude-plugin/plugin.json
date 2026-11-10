@@ -1,10 +1,10 @@
 {
   "name": "prompt-queue",
-  "version": "0.2.2",
-  "description": "Queue prompts with /queue while Claude works, then run them one by one after each task and its background jobs finish.",
+  "version": "0.3.0",
+  "description": "Queue prompts and slash commands with /queue while Claude works, then run them one by one after each task and its background jobs finish. Auto is on by default.",
   "author": { "name": "Zdeno Kuzmany", "url": "https://github.com/kuzmany" },
-  "homepage": "https://github.com/kuzmany/claude-code-prompt-queue",
-  "repository": "https://github.com/kuzmany/claude-code-prompt-queue",
+  "homepage": "https://github.com/qurakchin/claude-code-prompt-queue",
+  "repository": "https://github.com/qurakchin/claude-code-prompt-queue",
   "license": "MIT",
   "keywords": ["claude-code", "claude-code-plugin", "claude-mod", "prompt-queue", "queue", "task-queue", "slash-command", "automation", "productivity"],
   "types": "./types/index.d.ts"
