@@ -38,8 +38,26 @@ const forgetEnded = async ($: Engine, text: string) => {
 
 const PANE = 'queue'
 
+const SUBCOMMANDS = ['help', 'list', 'status', 'run', 'drop', 'clear', 'unblock', 'auto'] as const
+type Sub = (typeof SUBCOMMANDS)[number]
+
+const isSub = (word: string): word is Sub => (SUBCOMMANDS as readonly string[]).includes(word)
+
+const DESCRIPTIONS: Record<Sub, string> = {
+  help: 'List the queue commands',
+  list: 'Show parked entries',
+  status: 'Print the queue without opening the panel',
+  run: 'Send entry n now (default 1)',
+  drop: 'Remove entry n',
+  clear: 'Remove all entries',
+  unblock: 'Stop waiting on background jobs',
+  auto: 'Toggle running the queue after each task and its background jobs end',
+}
+
 // The hint the typeahead and the input box draw dim after the command name.
-const ARGUMENTS = '[text | /command | help|list|status|run|drop|clear|unblock|auto]'
+const ARGUMENTS = `[text | /command | ${SUBCOMMANDS.join('|')}]`
+// A top-level alias takes the arguments of the subcommand it stands for.
+const HINTS: Partial<Record<Sub, string>> = { run: '[n]', drop: '[n]' }
 
 const HELP = `/queue            open the panel: edit, reorder, run, remove
 /queue <text>     park a prompt
@@ -51,12 +69,11 @@ const HELP = `/queue            open the panel: edit, reorder, run, remove
 /queue drop <n>   remove entry n
 /queue clear      remove all entries
 /queue unblock    stop waiting on background jobs
-/queue-run [n]    send entry n now (default 1)
-/queue auto       toggle: run the queue after each task and its background jobs end
-/queue-auto       the same toggle`
+/queue auto       toggle: run the queue after each task and its background jobs end`
 
 type Scope = 'global' | 'session'
 type AutoMode = { scope: Scope; value: boolean }
+type Aliases = { words: Map<string, Sub>; commands: Map<string, Sub> }
 
 // The settings value names both the initial state and who keeps the toggle's choice.
 // Off and session-only is what the plugin did before the setting existed.
@@ -65,7 +82,35 @@ const readAutoMode = (raw: unknown): AutoMode => {
   return { scope: text.startsWith('session-') ? 'session' : 'global', value: !text.endsWith('false') }
 }
 
+// `list=ls` adds /queue ls; `auto=/queue-auto` registers /queue-auto. Commas or newlines split.
+const readAliases = (raw: unknown): Aliases => {
+  const words = new Map<string, Sub>()
+  // /queue-auto and /queue-run stay spellings of their subcommands, as they were before /queue auto.
+  const commands = new Map<string, Sub>([
+    ['queue-auto', 'auto'],
+    ['queue-run', 'run'],
+  ])
+  for (const entry of String(raw ?? '').split(/[,\n]+/)) {
+    const found = entry.trim().match(/^([a-z]+)\s*=\s*(\S+)$/)
+    if (!found) continue
+    const sub = found[1]!
+    if (!isSub(sub)) continue
+    const alias = found[2]!
+    if (alias.startsWith('/')) {
+      const name = alias.slice(1)
+      if (name !== 'queue' && /^[A-Za-z0-9_-]+$/.test(name)) commands.set(name, sub)
+    } else if (/^[A-Za-z0-9_-]+$/.test(alias)) {
+      words.set(alias, sub)
+    }
+  }
+  return { words, commands }
+}
+
 let autoMode: AutoMode = readAutoMode(undefined)
+let aliases: Aliases = readAliases('')
+// The alias commands this session registered. A name Claude Code or another
+// plugin already holds stays theirs, and only a registered one is answered.
+let registered = new Set<string>()
 
 // A leading slash parks a slash command rather than text for the model.
 const COMMAND = /^\/(\S+)(?:\s+([\s\S]*))?$/
@@ -129,6 +174,14 @@ const statusText = async ($: Engine) => {
   const head = `${list.length ? `${list.length} queued` : 'Queue is empty'} · auto ${isAuto ? 'on' : 'off'} (${autoMode.scope})`
   const waitingOn = jobs.length ? `waiting on ${jobs.length} background job(s): ${jobs.join(', ')}` : ''
   return [head, waitingOn, ...list.map((item, i) => `${i + 1}. ${textOf(item)}`)].filter(Boolean).join('\n')
+}
+
+const helpText = () => {
+  const lines = [
+    ...[...aliases.words].map(([word, sub]) => `/queue ${word}`.padEnd(17) + sub),
+    ...[...aliases.commands].map(([name, sub]) => `/${name}`.padEnd(17) + sub),
+  ]
+  return lines.length ? `${HELP}\n\nAliases:\n${lines.join('\n')}` : HELP
 }
 
 const move = ($: Engine, i: number, by: -1 | 1) =>
@@ -220,7 +273,7 @@ const sendIfIdle = async ($: Engine) => {
     await update($, items, list => [first, ...list])
     await update($, auto, () => false)
     const why = reason ? `: ${reason}` : ''
-    $.ui.toast(`Queue paused: could not send "${firstLine(textOf(first), 30)}"${why}. /queue-auto resumes.`)
+    $.ui.toast(`Queue paused: could not send "${firstLine(textOf(first), 30)}"${why}. /queue auto resumes.`)
   })
 }
 
@@ -288,8 +341,39 @@ const toggleAuto = async ($: Engine) => {
   return { text }
 }
 
+const runSub = async ($: Engine, sub: Sub, arg: string): Promise<{ text: string }> => {
+  if (sub === 'help') return { text: helpText() }
+  if (sub === 'status') return { text: await statusText($) }
+  if (sub === 'auto') return toggleAuto($)
+
+  const list = await read($, items)
+
+  if (sub === 'list') {
+    return { text: list.map((item, i) => `${i + 1}. ${textOf(item)}`).join('\n') || 'Queue is empty.' }
+  }
+
+  if (sub === 'clear') {
+    await update($, items, () => [])
+    return { text: `Cleared ${list.length} prompt(s).` }
+  }
+
+  if (sub === 'unblock') {
+    await update($, waiting, () => [])
+    await sendIfIdle($)
+    return { text: 'Stopped waiting on background jobs.' }
+  }
+
+  if (sub === 'run') return runNth($, arg)
+
+  const p = await pick($, arg)
+  if ('error' in p) return { text: p.error }
+  await removeAt($, p.i)
+  return { text: `Dropped: ${textOf(p.item)}` }
+}
+
 export const register: Register = (on, options) => {
   autoMode = readAutoMode(options.autoMode)
+  aliases = readAliases(options.aliases)
 
   on('session.start', async ($, e, next) => {
     // Read the setting once per session; a reload keeps what a toggle stored.
@@ -304,16 +388,23 @@ export const register: Register = (on, options) => {
       argumentHint: ARGUMENTS,
       immediate: true,
     })
-    await $.command.register({
-      name: 'queue-auto',
-      description: 'Toggle running the queue after each task and its background jobs end',
-      immediate: true,
-    })
-    await $.command.register({
-      name: 'queue-run',
-      description: 'Send the next queued prompt now (or prompt n)',
-      immediate: true,
-    })
+    registered = new Set()
+    for (const [name, sub] of aliases.commands) {
+      const argumentHint = HINTS[sub]
+      try {
+        await $.command.register({
+          name,
+          description: DESCRIPTIONS[sub],
+          ...(argumentHint ? { argumentHint } : {}),
+          immediate: true,
+        })
+        registered.add(name)
+      } catch {
+        // A name another plugin or Claude Code already uses stays theirs; say
+        // so, since the alias silently does nothing otherwise.
+        $.ui.toast(`/${name} is taken; that alias is off for this session.`)
+      }
+    }
 
     // A reload after saving a global choice re-runs this; the send it dropped goes here.
     await sendIfIdle($)
@@ -363,7 +454,7 @@ export const register: Register = (on, options) => {
     // Esc turns auto off instead of starting the next prompt.
     if (e.isAborted && (await read($, auto))) {
       await update($, auto, () => false)
-      $.ui.toast('Queue auto is off. /queue-auto turns it back on.')
+      $.ui.toast('Queue auto is off. /queue auto turns it back on.')
     } else {
       await sendIfIdle($)
     }
@@ -371,54 +462,34 @@ export const register: Register = (on, options) => {
     return ended
   })
 
-  // Shortcut for /queue run [n].
-  on('command.run', { command: 'queue-run' }, async ($, e) => {
-    const n = e.args.trim()
-    if (n && !/^\d+$/.test(n)) return { text: 'Usage: /queue-run [n]' }
-    return runNth($, n)
-  })
-
-  on('command.run', { command: 'queue-auto' }, async $ => toggleAuto($))
+  // Built-in shortcuts (/queue-run, /queue-auto) and the commands an alias setting adds.
+  for (const [name, sub] of aliases.commands) {
+    on('command.run', { command: name }, async ($, e, next) => {
+      // A name that could not be registered belongs to someone else: answer
+      // nothing of it and let the command it names run.
+      if (!registered.has(name)) return next(e)
+      // The arguments go to the subcommand as typed; /queue itself would queue
+      // ones the subcommand does not take as a prompt instead.
+      return runSub($, sub, e.args.trim())
+    })
+  }
 
   on('command.run', { command: 'queue' }, async ($, e) => {
     const args = e.args.trim()
-    // A subcommand is matched only in its exact form, so "/queue list the files" is queued.
-    const found = args.match(/^(help|list|clear|unblock|status|auto)$|^(run|drop)(?:\s+(\d+))?$/)
-    const word = found?.[1] ?? found?.[2]
-    const arg = found?.[3] ?? ''
-    if (word === 'help') return { text: HELP }
-    if (word === 'status') return { text: await statusText($) }
-    if (word === 'auto') return toggleAuto($)
-
     if (args === '') {
       await $.ui.open({ id: PANE, title: 'Queue', focus: true, closeOnEscape: true })
       return { text: 'Queue panel opened.' }
     }
 
-    const list = await read($, items)
-
-    if (word === 'list') {
-      return { text: list.map((item, j) => `${j + 1}. ${textOf(item)}`).join('\n') || 'Queue is empty.' }
-    }
-
-    if (word === 'clear') {
-      await update($, items, () => [])
-      return { text: `Cleared ${list.length} prompt(s).` }
-    }
-
-    if (word === 'unblock') {
-      await update($, waiting, () => [])
-      await sendIfIdle($)
-      return { text: 'Stopped waiting on background jobs.' }
-    }
-
-    if (word === 'run') return runNth($, arg)
-
-    if (word === 'drop') {
-      const p = await pick($, arg)
-      if ('error' in p) return { text: p.error }
-      await removeAt($, p.i)
-      return { text: `Dropped: ${textOf(p.item)}` }
+    // A subcommand matches only in its own form, so "/queue list the files" is queued.
+    const [word = '', ...tail] = args.split(/\s+/)
+    const sub = aliases.words.get(word) ?? (isSub(word) ? word : undefined)
+    if (sub) {
+      const takesNumber = sub === 'run' || sub === 'drop'
+      const fits = takesNumber
+        ? tail.length <= 1 && (tail[0] === undefined || /^\d+$/.test(tail[0]))
+        : tail.length === 0
+      if (fits) return runSub($, sub, tail[0] ?? '')
     }
 
     // A leading slash that names no command cannot be run or sent, so it is
@@ -426,6 +497,7 @@ export const register: Register = (on, options) => {
     const bad = badCommand(args)
     if (bad) return { text: REFUSED(bad) }
 
+    const list = await read($, items)
     await enqueue($, args)
 
     return { text: `Queued #${list.length + 1}.` }
