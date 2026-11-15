@@ -409,6 +409,45 @@ test('auto waits for background jobs before the next prompt', async ($, on) => {
   expect(sent.at(-1)).toBe('b')
 })
 
+test('a job notice delivered into a running turn frees the queue', async ($, on) => {
+  const clock = mock.clock(on)
+  const sent: string[] = []
+  on('turn.complete', () => ({ text: '' }))
+  on('prompt.attachment', (_: any, e: any) => ({ text: e.text }))
+  on('tool.call', () => ({
+    result: { stdout: '' },
+    text: 'Command running in background with ID: b123. Output is being written to: /x',
+  }))
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  const endTurn = () =>
+    $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
+
+  await start($, on)
+  for (const t of ['a', 'b']) await $.command.run({ command: 'queue', args: t })
+  await $.command.run({ command: 'queue-auto', args: '' })
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+
+  await $.tool.call({ tool: 'Bash', command: 'sleep 10', run_in_background: true })
+  await endTurn()
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+
+  // A notice that arrives mid-turn rides on the turn as a queued command, so
+  // prompt.submit never sees it.
+  await $.prompt.attachment({
+    type: 'queued_command',
+    text: '<task-notification><task-id>b123</task-id><status>completed</status></task-notification>',
+    origin: { kind: 'engine' },
+  } as never)
+  await endTurn()
+  await clock.advance(1)
+  expect(sent.at(-1)).toBe('b')
+})
+
 test('tool output that only quotes job words is not a job', async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
