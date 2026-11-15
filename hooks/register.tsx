@@ -23,6 +23,17 @@ const HANDED_BACK = /<agent-message from="([^"]+)">\s*\[Subagent hand-back\]/g
 // Job notices arrive on their own or inside another session's message, never in a prompt the user typed.
 const NOTICE_ORIGINS = ['task-notification', 'peer']
 
+// The ids a notice says ended. A notice arrives as its own prompt when the
+// session is idle, and as a queued command inside the running turn when it is
+// not: both carry the same block.
+const endedIn = (text: string) =>
+  [...text.matchAll(FINISHED), ...text.matchAll(HANDED_BACK)].map(match => match[1]!)
+
+const forgetEnded = async ($: Engine, text: string) => {
+  const ended = endedIn(text)
+  if (ended.length) await update($, waiting, ids => ids.filter(one => !ended.includes(one)))
+}
+
 const PANE = 'queue'
 
 // The hint the typeahead and the input box draw dim after the command name.
@@ -264,10 +275,15 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (NOTICE_ORIGINS.includes(e.origin.kind)) {
-      const ended = [...e.text.matchAll(FINISHED), ...e.text.matchAll(HANDED_BACK)].map(match => match[1])
-      if (ended.length) await update($, waiting, ids => ids.filter(one => !ended.includes(one)))
-    }
+    if (NOTICE_ORIGINS.includes(e.origin.kind)) await forgetEnded($, e.text)
+
+    return next(e)
+  })
+
+  on('prompt.attachment', async ($, e, next) => {
+    // A notice that arrives while a turn runs is queued into it as a command
+    // instead of reaching prompt.submit; without it here, auto waits forever.
+    if (e.type === 'queued_command') await forgetEnded($, e.text)
 
     return next(e)
   })
