@@ -152,6 +152,195 @@ test('auto sends all prompts one by one and stays on', async ($, on) => {
   expect(sent).toEqual(['a', 'b', 'c', 'd'])
 })
 
+test('hold reads plain durations and refuses anything else', async ($, on) => {
+  await start($, on)
+  const cases: [string, string][] = [
+    ['1h', '1h'],
+    ['1hour', '1h'],
+    ['1 h', '1h'],
+    ['1 min', '1m'],
+    ['1s', '1s'],
+    ['0.5h', '30m'],
+    ['90m', '1h30m'],
+    ['1h30m', '1h30m'],
+  ]
+  for (const [i, [arg, shown]] of cases.entries()) {
+    const out = await $.command.run({ command: 'queue', args: `hold ${arg}` })
+    expect(out.text).toBe(`Queued #${i + 1}: hold ${shown}.`)
+  }
+
+  const bad = await $.command.run({ command: 'queue', args: 'hold 1x' })
+  expect(bad.text).toBe('"1x" is not a duration. Use a duration like 30m, 1h, 0.5h, 1 hour or 1h30m.')
+  const empty = await $.command.run({ command: 'queue', args: 'hold' })
+  expect(empty.text).toBe('hold needs a duration. Use a duration like 30m, 1h, 0.5h, 1 hour or 1h30m.')
+  for (const junk of ['1', '-1h', '0h', '1h junk', '1hh', '1.5x']) {
+    const out = await $.command.run({ command: 'queue', args: `hold ${junk}` })
+    expect(out.text).toContain(`"${junk}" is not a duration.`)
+  }
+
+  // Nothing refused was parked.
+  expect((await $.command.run({ command: 'queue', args: 'list' })).text.split('\n')).toHaveLength(cases.length)
+})
+
+test('auto sends a and c with an hour between them', async ($, on) => {
+  const clock = mock.clock(on)
+  const sent: string[] = []
+  on('ui.toast', () => ({ value: undefined }))
+  on('turn.complete', () => ({ text: '' }))
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>core</Text>
+  })
+  const band = async (text: RegExp) => {
+    const h = await $.ui.mount({ plugin: 'prompt-queue', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} } } as any)
+    const found = await h.find({ type: 'Text', text })
+    await h.unmount()
+    return !!found
+  }
+  const endTurn = () =>
+    $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
+
+  await start($, on)
+  for (const args of ['a', 'hold 1h', 'c']) await $.command.run({ command: 'queue', args })
+  await $.command.run({ command: 'queue-auto', args: '' })
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+
+  // a ended: the hold starts its hour instead of anything being sent.
+  await endTurn()
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+  expect(await band(/hold until \d\d:\d\d/)).toBe(true)
+  const status = await $.command.run({ command: 'queue', args: 'status' })
+  expect(status.text).toMatch(/1\. hold 1h · until \d\d:\d\d · 1h left/)
+  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('1. hold 1h\n2. c')
+
+  await clock.advance(3600000 - 2)
+  expect(sent).toEqual(['a'])
+  await clock.advance(2)
+  await clock.advance(1)
+  expect(sent).toEqual(['a', 'c'])
+})
+
+test('dropping the hold lets what follows go', async ($, on) => {
+  const clock = mock.clock(on)
+  const sent: string[] = []
+  on('turn.complete', () => ({ text: '' }))
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  const endTurn = () =>
+    $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
+
+  await start($, on)
+  for (const args of ['a', 'hold 1h', 'c']) await $.command.run({ command: 'queue', args })
+  await $.command.run({ command: 'queue-auto', args: '' })
+  await clock.advance(1)
+  await endTurn()
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+
+  const dropped = await $.command.run({ command: 'queue', args: 'drop 1' })
+  expect(dropped.text).toBe('Dropped: hold 1h')
+  await clock.advance(1)
+  expect(sent).toEqual(['a', 'c'])
+})
+
+test('unblock clears background jobs and holds alike', async ($, on) => {
+  const clock = mock.clock(on)
+  const sent: string[] = []
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+
+  await start($, on)
+  await $.command.run({ command: 'queue', args: 'hold 30m' })
+  await $.command.run({ command: 'queue', args: 'after' })
+  await $.command.run({ command: 'queue-auto', args: '' })
+  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('1. hold 30m\n2. after')
+
+  const out = await $.command.run({ command: 'queue', args: 'unblock' })
+  expect(out.text).toBe('Stopped waiting on background jobs and holds.')
+  await clock.advance(1)
+  expect(sent).toEqual(['after'])
+})
+
+test('run refuses a hold, which sends nothing', async ($, on) => {
+  await start($, on)
+  await $.command.run({ command: 'queue', args: 'hold 30m' })
+  const out = await $.command.run({ command: 'queue', args: 'run 1' })
+  expect(out.text).toBe('hold 30m sends nothing; it starts when auto reaches it. /queue drop 1 removes it.')
+  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('1. hold 30m')
+})
+
+test('a reload re-arms the hold clock instead of restarting it', async ($, on) => {
+  const clock = mock.clock(on)
+  const sent: string[] = []
+  on('turn.complete', () => ({ text: '' }))
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  const endTurn = () =>
+    $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
+  const reload = () => $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  await start($, on)
+  for (const args of ['a', 'hold 1h', 'c']) await $.command.run({ command: 'queue', args })
+  await $.command.run({ command: 'queue-auto', args: '' })
+  await clock.advance(1)
+  await endTurn()
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+
+  // Ten minutes in, the plugin reloads; the hold keeps the time it had left.
+  // t=2 then +600000 -> 600002; the hold ends at 3600001.
+  await clock.advance(600000)
+  await reload()
+  await clock.advance(2999998)
+  expect(sent).toEqual(['a'])
+  await clock.advance(1)
+  await clock.advance(1)
+  expect(sent).toEqual(['a', 'c'])
+})
+
+test('panel edits a hold by its duration and refuses a bad one', async ($, on) => {
+  const toasts: string[] = []
+  on('ui.toast', ($: any, e: any) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await start($, on)
+  await $.command.run({ command: 'queue', args: 'hold 1h' })
+  await $.command.run({ command: 'queue', args: '' })
+  const ui = await $.ui.mount({ plugin: 'prompt-queue', surface: 'terminal', component: 'Pane', requestId: 'queue',
+    props: { title: 'Queue', isFocused: true, bodyColumns: 100, placement: 'dock' } } as any)
+  const list = async () => (await $.command.run({ command: 'queue', args: 'list' })).text
+
+  await ui.input({ key: 'edit-0', text: '2h' })
+  expect(await list()).toBe('1. hold 2h')
+  await ui.input({ key: 'edit-0', text: 'nope' })
+  expect(toasts).toEqual(['"nope" is not a duration. Use a duration like 30m, 1h, 0.5h, 1 hour or 1h30m.'])
+  expect(await list()).toBe('1. hold 2h')
+  await ui.input({ key: 'edit-0', text: '' })
+  expect(await list()).toBe('Queue is empty.')
+
+  // Adding "hold 30m" in the panel parks the same entry the command does.
+  await ui.input({ key: 'new', text: 'hold 30m' })
+  expect(await list()).toBe('1. hold 30m')
+  await ui.input({ key: 'new', text: 'hold nope' })
+  expect(toasts.at(-1)).toBe('"nope" is not a duration. Use a duration like 30m, 1h, 0.5h, 1 hour or 1h30m.')
+  expect(await list()).toBe('1. hold 30m')
+  await ui.unmount()
+})
+
 test('toggling auto on mid-task waits for the task to end', async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []
@@ -715,7 +904,7 @@ test('commands carry the argument hint the typeahead shows', { options: { aliase
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
-  expect(hints.queue).toBe('[text | /command | help|list|status|run|drop|clear|unblock|auto]')
+  expect(hints.queue).toBe('[text | /command | help|list|status|run|drop|clear|unblock|auto|hold]')
   expect(hints.qr).toBe('[n]')
   expect(hints['queue-auto']).toBeUndefined()
 })

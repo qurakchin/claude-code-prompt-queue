@@ -41,18 +41,19 @@ claude plugin uninstall prompt-queue@prompt-queue
 
 | Command | What it does |
 | --- | --- |
-| `/queue` | Open the queue panel: edit, move up or down, run (▶) or remove (✕) each entry, and add new ones. |
+| `/queue` | Open the queue panel: edit, move up or down, run (▶, prompts and commands only) or remove (✕) each entry, and add new ones. |
 | `/queue <text>` | Park a prompt. Works while Claude is busy. |
 | `/queue /name [args]` | Park a slash command to run as if you typed it. |
+| `/queue hold <time>` | Park a wait: nothing behind it starts until the time is up. |
 | `/queue list` | Show parked entries. |
 | `/queue status` | Print the queue state without opening the panel. |
-| `/queue run [n]` | Send entry n now (default 1). |
+| `/queue run [n]` | Send entry n now (default 1). A hold sends nothing, so it is refused. |
 | `/queue drop <n>` | Remove entry n. |
 | `/queue clear` | Remove all entries. |
 | `/queue-run [n]` | Send the next entry now (or entry n). Same as `/queue run`. |
 | `/queue auto` | Toggle auto mode. With the default setting the choice lasts for this session. |
 | `/queue-auto` | The same toggle, under its old name. |
-| `/queue unblock` | Stop waiting on background jobs. |
+| `/queue unblock` | Stop waiting on background jobs and holds. |
 
 **Auto mode** is off by default. When on, the next entry starts only after the current task ends **and** every background job or agent it started has finished. Then the next, until the queue is empty. Auto stays on until you toggle it off. Pressing Esc turns it off too. Whether `/queue auto`'s choice lasts past the session is up to the **Auto mode** setting.
 
@@ -66,17 +67,28 @@ claude plugin uninstall prompt-queue@prompt-queue
 
 A parked slash command runs through `$.command.run`, so it reaches the same command, arguments and hooks as typing it. The next entry waits until that command's turn has started, or a short while if it starts none.
 
+**A hold** is an entry that sends nothing. When auto reaches it, it starts its clock and the entries behind it wait; when the time is up, it leaves the queue and the next entry goes. So with `a`, `hold 1h`, `c` parked in auto mode, `c` starts an hour after `a` ended:
+
+```
+/queue a
+/queue hold 1h
+/queue c
+/queue auto
+```
+
+Durations take `s`, `m` and `h` or their words (`1h`, `1hour`, `1 hour`, `90m`, `1 min`, `1s`, `0.5h`, `1h30m`). Anything else is refused with a message and nothing is parked. The clock is the wall's: it keeps running while auto is off or the plugin reloads, and a machine that slept fires it late. `/queue drop n`, `/queue clear` and `/queue unblock` cancel it; `/queue status` shows `hold 1h · until 14:30 · 42m left`, and the band above the prompt shows `auto · hold until 14:30`. The queue belongs to the session, so closing the session ends a hold with it.
+
 Text that starts with `/` but names no command (`/Users/me/x.md look at this`) is refused when you queue it: a prompt cannot start with `/`, and no such command exists.
 
 If a prompt cannot be sent, it stays in the queue: auto entries return to the front and auto turns off with a toast; a manual run puts it back where it was. `/queue auto` resumes. A slash command that cannot run (an unknown name, a command that fails) is removed with a toast instead, so it does not block the entries behind it.
 
-Above the prompt, each queued entry shows on its own soft amber line, as `#1 <text>` (first 5, then `+N more`). In auto mode a dim line below them shows the state, for example `auto · waiting on 1 bg`. With the queue empty it draws nothing, even while auto is on, so the row stays free for other mods. Other mods can add to the same row.
+Above the prompt, each queued entry shows on its own soft amber line, as `#1 <text>` (first 5, then `+N more`). In auto mode a dim line below them shows the state, for example `auto · waiting on 1 bg` or `auto · hold until 14:30`. With the queue empty it draws nothing, even while auto is on, so the row stays free for other mods. Other mods can add to the same row.
 
 `/queue help` lists the commands.
 
 The queue belongs to the current session.
 
-If auto keeps waiting on a job that already ended (for example one a subagent started), run `/queue unblock`.
+If auto keeps waiting on a job that already ended (for example one a subagent started), run `/queue unblock`; it also cancels any hold and lets the entries behind it go.
 
 ## Settings
 

@@ -38,7 +38,7 @@ const forgetEnded = async ($: Engine, text: string) => {
 
 const PANE = 'queue'
 
-const SUBCOMMANDS = ['help', 'list', 'status', 'run', 'drop', 'clear', 'unblock', 'auto'] as const
+const SUBCOMMANDS = ['help', 'list', 'status', 'run', 'drop', 'clear', 'unblock', 'auto', 'hold'] as const
 type Sub = (typeof SUBCOMMANDS)[number]
 
 const isSub = (word: string): word is Sub => (SUBCOMMANDS as readonly string[]).includes(word)
@@ -50,14 +50,15 @@ const DESCRIPTIONS: Record<Sub, string> = {
   run: 'Send entry n now (default 1)',
   drop: 'Remove entry n',
   clear: 'Remove all entries',
-  unblock: 'Stop waiting on background jobs',
+  unblock: 'Stop waiting on background jobs and holds',
   auto: 'Toggle running the queue after each task and its background jobs end',
+  hold: 'Park a wait: nothing after it starts until the time is up',
 }
 
 // The hint the typeahead and the input box draw dim after the command name.
 const ARGUMENTS = `[text | /command | ${SUBCOMMANDS.join('|')}]`
 // A top-level alias takes the arguments of the subcommand it stands for.
-const HINTS: Partial<Record<Sub, string>> = { run: '[n]', drop: '[n]' }
+const HINTS: Partial<Record<Sub, string>> = { run: '[n]', drop: '[n]', hold: '[duration]' }
 
 const HELP = `/queue            open the panel: edit, reorder, run, remove
 /queue <text>     park a prompt
@@ -68,8 +69,9 @@ const HELP = `/queue            open the panel: edit, reorder, run, remove
 /queue run [n]    send entry n now (default 1)
 /queue drop <n>   remove entry n
 /queue clear      remove all entries
-/queue unblock    stop waiting on background jobs
-/queue auto       toggle: run the queue after each task and its background jobs end`
+/queue unblock    stop waiting on background jobs and holds
+/queue auto       toggle: run the queue after each task and its background jobs end
+/queue hold <time> park a wait: 30m, 1h, 0.5h, 1 hour, 1h30m`
 
 type Scope = 'global' | 'session'
 type AutoMode = { scope: Scope; value: boolean }
@@ -127,6 +129,58 @@ const parseEntry = (text: string): QueueItem => {
     : { kind: 'prompt', text: trimmed }
 }
 
+// What one unit is worth, in milliseconds. The spellings people type: h, hr,
+// hrs, hour, hours; m, min, mins, minute, minutes; s, sec, secs, second, seconds.
+const UNIT_MS: Record<string, number> = {
+  s: 1000, sec: 1000, secs: 1000, second: 1000, seconds: 1000,
+  m: 60000, min: 60000, mins: 60000, minute: 60000, minutes: 60000,
+  h: 3600000, hr: 3600000, hrs: 3600000, hour: 3600000, hours: 3600000,
+}
+
+const DURATION_PART = /^(\d+(?:\.\d+)?)\s*([a-z]+)/
+
+// `30m`, `1h`, `0.5h`, `1 hour`, `1 h 30 min`, `1h30m` -> milliseconds.
+// The whole text has to be durations: a leftover word makes it undefined.
+const parseDuration = (text: string): number | undefined => {
+  let rest = text.trim().toLowerCase()
+  if (!rest) return undefined
+  let total = 0
+  while (rest) {
+    const found = rest.match(DURATION_PART)
+    if (!found) return undefined
+    const unit = UNIT_MS[found[2]!]
+    if (unit === undefined) return undefined
+    total += Number(found[1]) * unit
+    rest = rest.slice(found[0].length).trimStart()
+  }
+  if (!Number.isFinite(total) || total <= 0) return undefined
+  return Math.round(total)
+}
+
+// The duration as the shortest common spelling: 90m, 1h30m, 30s.
+const formatDuration = (ms: number) => {
+  const parts: string[] = []
+  let left = Math.round(ms / 1000)
+  const hours = Math.floor(left / 3600)
+  left -= hours * 3600
+  const minutes = Math.floor(left / 60)
+  left -= minutes * 60
+  if (hours) parts.push(`${hours}h`)
+  if (minutes) parts.push(`${minutes}m`)
+  if (left) parts.push(`${left}s`)
+  return parts.join('') || '0s'
+}
+
+const HOLD_HINT = 'Use a duration like 30m, 1h, 0.5h, 1 hour or 1h30m.'
+const holdRefusal = (arg: string) =>
+  arg.trim() ? `"${arg.trim()}" is not a duration. ${HOLD_HINT}` : `hold needs a duration. ${HOLD_HINT}`
+
+// The local time a deadline falls on, for the band and status.
+const clockLabel = (ms: number) => {
+  const at = new Date(ms)
+  return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+}
+
 // The token after the slash when the text starts with one that names no command.
 const badCommand = (text: string) => {
   const trimmed = text.trim()
@@ -145,9 +199,13 @@ const refuse = ($: Engine, text: string) => {
   return bad !== undefined
 }
 
-// The line a parked entry shows as: its command as typed, or its prompt.
+// The line a parked entry shows as: its command as typed, its prompt, or its hold.
 const textOf = (item: QueueItem) =>
-  item.kind === 'prompt' ? item.text : `/${item.command}${item.args ? ` ${item.args}` : ''}`
+  item.kind === 'prompt'
+    ? item.text
+    : item.kind === 'hold'
+      ? `hold ${formatDuration(item.ms)}`
+      : `/${item.command}${item.args ? ` ${item.args}` : ''}`
 
 // The first line of an entry, cut to `width` columns.
 const firstLine = (text: string, width: number) => {
@@ -158,6 +216,17 @@ const firstLine = (text: string, width: number) => {
 // How many queued prompts the band above the prompt lists before "+N more".
 const SHOWN = 5
 
+// The active hold at the front, for the band: an absolute time, since nothing
+// redraws per second.
+const holdState = (item: QueueItem | undefined) =>
+  item?.kind === 'hold' && item.until !== undefined ? `hold until ${clockLabel(item.until)}` : ''
+
+// One entry in the panel's status text: a started hold also says what is left.
+const statusLine = (item: QueueItem, now: number) =>
+  item.kind === 'hold' && item.until !== undefined
+    ? `${textOf(item)} · until ${clockLabel(item.until)} · ${formatDuration(Math.max(item.until - now, 0))} left`
+    : textOf(item)
+
 // The state drawn dim in the band above the prompt.
 const stateText = async ($: Engine) => {
   const [list, isAuto] = await Promise.all([read($, items), read($, auto)])
@@ -165,7 +234,7 @@ const stateText = async ($: Engine) => {
   // With nothing parked the band stays free for other mods, even while auto is on.
   if (!count) return ''
   const jobs = isAuto ? (await read($, waiting)).length : 0
-  return [isAuto && 'auto', isAuto && jobs && `waiting on ${jobs} bg`]
+  return [isAuto && 'auto', holdState(list[0]), isAuto && jobs && `waiting on ${jobs} bg`]
     .filter(Boolean)
     .join(' · ')
 }
@@ -173,9 +242,12 @@ const stateText = async ($: Engine) => {
 // The panel's content as text, with no editing or buttons.
 const statusText = async ($: Engine) => {
   const [list, isAuto, jobs] = await Promise.all([read($, items), read($, auto), read($, waiting)])
+  // The clock is asked only when a hold is counting: status works without one.
+  const counting = list.some(item => item.kind === 'hold' && item.until !== undefined)
+  const now = counting ? await $.clock.now() : 0
   const head = `${list.length ? `${list.length} queued` : 'Queue is empty'} · auto ${isAuto ? 'on' : 'off'} (${autoMode.scope})`
   const waitingOn = jobs.length ? `waiting on ${jobs.length} background job(s): ${jobs.join(', ')}` : ''
-  return [head, waitingOn, ...list.map((item, i) => `${i + 1}. ${textOf(item)}`)].filter(Boolean).join('\n')
+  return [head, waitingOn, ...list.map((item, i) => `${i + 1}. ${statusLine(item, now)}`)].filter(Boolean).join('\n')
 }
 
 const helpText = () => {
@@ -197,9 +269,34 @@ const move = ($: Engine, i: number, by: -1 | 1) =>
 
 const removeAt = ($: Engine, i: number) => update($, items, list => list.filter((_, j) => j !== i))
 
+// Removing the front hold stops its clock; whatever came after it may go.
+const dropAt = async ($: Engine, i: number) => {
+  const item = (await read($, items))[i]
+  const wasActive = item?.kind === 'hold' && item.until !== undefined
+  await removeAt($, i)
+  if (wasActive) disarmHold()
+  await sendIfIdle($)
+}
+
 // Empty text removes the entry.
-const edit = ($: Engine, i: number, text: string) =>
-  text.trim() ? update($, items, list => list.map((item, j) => (j === i ? parseEntry(text) : item))) : removeAt($, i)
+const edit = async ($: Engine, i: number, text: string) => {
+  if (!text.trim()) {
+    await dropAt($, i)
+    return
+  }
+  await update($, items, list => list.map((item, j) => (j === i ? parseEntry(text) : item)))
+}
+
+// A new duration starts the hold over from the moment it reaches the front.
+const changeHold = async ($: Engine, i: number, ms: number) => {
+  const item = (await read($, items))[i]
+  const wasActive = item?.kind === 'hold' && item.until !== undefined
+  await update($, items, list => list.map((one, j) => (j === i ? { kind: 'hold', ms } : one)))
+  if (wasActive && i === 0) {
+    disarmHold()
+    await sendIfIdle($)
+  }
+}
 
 // How long a command that starts no turn holds the queue. The engine raises a
 // command's turn after $.command.run resolves, so sending never means "no turn"
@@ -265,11 +362,69 @@ const send = async (
   })
 }
 
+type HoldItem = Extract<QueueItem, { kind: 'hold' }>
+
+// One hold at a time: the entry at the front. The clock is the wall's, so a
+// reload re-arms it from `until`, and a machine that slept fires it late.
+let holdTimer: { cancel: () => void } | undefined
+let holdUntil: number | undefined
+
+const disarmHold = () => {
+  holdTimer?.cancel()
+  holdTimer = undefined
+  holdUntil = undefined
+}
+
+const armHold = async ($: Engine, until: number) => {
+  if (holdUntil === until && holdTimer !== undefined) return
+  disarmHold()
+  holdUntil = until
+  const wait = until - (await $.clock.now())
+  holdTimer = $.clock.after(Math.max(wait, 0), () => void expireHold($, until))
+}
+
+// The wait is over: drop the front hold if it is still the same one, and let
+// what follows go. A timer whose hold was dropped or re-armed does nothing.
+const expireHold = async ($: Engine, until: number) => {
+  if (holdUntil !== until) return
+  disarmHold()
+  const [first] = await read($, items)
+  if (first?.kind !== 'hold' || first.until !== until) return
+  const now = await $.clock.now()
+  if (now < until) {
+    await armHold($, until)
+    return
+  }
+  await update($, items, list =>
+    list[0]?.kind === 'hold' && list[0].until === until ? list.slice(1) : list,
+  )
+  await sendIfIdle($)
+}
+
+// Reaching a hold starts its clock; it sends nothing itself.
+const startHold = async ($: Engine, item: HoldItem) => {
+  if (item.until !== undefined) {
+    await armHold($, item.until)
+    return
+  }
+  const until = (await $.clock.now()) + item.ms
+  await update($, items, list =>
+    list[0]?.kind === 'hold' && list[0].until === undefined ? [{ ...list[0], until }, ...list.slice(1)] : list,
+  )
+  // A concurrent call may have started it first; arm what the entry now says.
+  const [first] = await read($, items)
+  if (first?.kind === 'hold' && first.until !== undefined) await armHold($, first.until)
+}
+
 // Auto sends the next entry only when no turn runs and no background job is left.
 const sendIfIdle = async ($: Engine) => {
   if ((await read($, busy)) || !(await read($, auto)) || (await read($, waiting)).length) return
   const [first] = await read($, items)
   if (first === undefined) return
+  if (first.kind === 'hold') {
+    await startHold($, first)
+    return
+  }
   await send($, first, () => update($, items, list => list.slice(1)), async reason => {
     // Keep what could not be sent, at the front, and stop trying on its own.
     await update($, items, list => [first, ...list])
@@ -279,9 +434,37 @@ const sendIfIdle = async ($: Engine) => {
   })
 }
 
+// "hold 1h" typed into the panel is the same entry the command parks.
+const HOLD_TEXT = /^hold\s+(.+)$/i
+
+const parkHold = async ($: Engine, ms: number) => {
+  const count = (await read($, items)).length
+  await update($, items, list => [...list, { kind: 'hold', ms }])
+  await sendIfIdle($)
+  return count + 1
+}
+
 const enqueue = async ($: Engine, text: string) => {
+  const hold = text.trim().match(HOLD_TEXT)
+  if (hold) {
+    const ms = parseDuration(hold[1]!)
+    if (ms === undefined) {
+      $.ui.toast(holdRefusal(hold[1]!))
+      return
+    }
+    await parkHold($, ms)
+    return
+  }
   await update($, items, list => [...list, parseEntry(text)])
   await sendIfIdle($)
+}
+
+// /queue hold <time> parks a wait, refusing a duration it cannot read.
+const enqueueHold = async ($: Engine, arg: string) => {
+  const ms = parseDuration(arg)
+  if (ms === undefined) return { text: holdRefusal(arg) }
+  const at = await parkHold($, ms)
+  return { text: `Queued #${at}: hold ${formatDuration(ms)}.` }
 }
 
 const runAt = async ($: Engine, i: number, item: QueueItem) => {
@@ -307,6 +490,9 @@ const pick = async ($: Engine, arg: string) => {
 const runNth = async ($: Engine, arg: string) => {
   const p = await pick($, arg)
   if ('error' in p) return { text: p.error }
+  if (p.item.kind === 'hold') {
+    return { text: `${textOf(p.item)} sends nothing; it starts when auto reaches it. /queue drop ${p.i + 1} removes it.` }
+  }
   await runAt($, p.i, p.item)
   return { text: `Sending: ${textOf(p.item)}` }
 }
@@ -347,6 +533,7 @@ const runSub = async ($: Engine, sub: Sub, arg: string): Promise<{ text: string 
   if (sub === 'help') return { text: helpText() }
   if (sub === 'status') return { text: await statusText($) }
   if (sub === 'auto') return toggleAuto($)
+  if (sub === 'hold') return enqueueHold($, arg)
 
   const list = await read($, items)
 
@@ -355,21 +542,24 @@ const runSub = async ($: Engine, sub: Sub, arg: string): Promise<{ text: string 
   }
 
   if (sub === 'clear') {
+    disarmHold()
     await update($, items, () => [])
     return { text: `Cleared ${list.length} prompt(s).` }
   }
 
   if (sub === 'unblock') {
+    disarmHold()
     await update($, waiting, () => [])
+    await update($, items, entries => entries.filter(item => item.kind !== 'hold'))
     await sendIfIdle($)
-    return { text: 'Stopped waiting on background jobs.' }
+    return { text: 'Stopped waiting on background jobs and holds.' }
   }
 
   if (sub === 'run') return runNth($, arg)
 
   const p = await pick($, arg)
   if ('error' in p) return { text: p.error }
-  await removeAt($, p.i)
+  await dropAt($, p.i)
   return { text: `Dropped: ${textOf(p.item)}` }
 }
 
@@ -407,6 +597,10 @@ export const register: Register = (on, options) => {
         $.ui.toast(`/${name} is taken; that alias is off for this session.`)
       }
     }
+
+    // A hold started before a reload keeps its wall clock: arm what is left of it.
+    const [head] = await read($, items)
+    if (head?.kind === 'hold' && head.until !== undefined) await armHold($, head.until)
 
     // A reload after saving a global choice re-runs this; the send it dropped goes here.
     await sendIfIdle($)
@@ -487,6 +681,8 @@ export const register: Register = (on, options) => {
     const [word = '', ...tail] = args.split(/\s+/)
     const sub = aliases.words.get(word) ?? (isSub(word) ? word : undefined)
     if (sub) {
+      // hold takes the rest as its duration ("1 h" is one argument).
+      if (sub === 'hold') return runSub($, sub, tail.join(' '))
       const takesNumber = sub === 'run' || sub === 'drop'
       const fits = takesNumber
         ? tail.length <= 1 && (tail[0] === undefined || /^\d+$/.test(tail[0]))
@@ -551,8 +747,18 @@ export const register: Register = (on, options) => {
             <Box key={`row-${i}`} flexDirection="row">
               <Text>{i + 1}. </Text>
               {Input ? (
-                <Input key={`edit-${i}`} value={textOf(item)} submitLabel="save"
-                  onSubmit={(v: string) => { if (!refuse($, v)) void edit($, i, v) }} />
+                item.kind === 'hold' ? (
+                  <Input key={`edit-${i}`} value={formatDuration(item.ms)} submitLabel="save"
+                    onSubmit={(v: string) => {
+                      if (!v.trim()) return void dropAt($, i)
+                      const ms = parseDuration(v)
+                      if (ms === undefined) $.ui.toast(holdRefusal(v))
+                      else void changeHold($, i, ms)
+                    }} />
+                ) : (
+                  <Input key={`edit-${i}`} value={textOf(item)} submitLabel="save"
+                    onSubmit={(v: string) => { if (!refuse($, v)) void edit($, i, v) }} />
+                )
               ) : (
                 <Text>{textOf(item)}</Text>
               )}
@@ -561,14 +767,16 @@ export const register: Register = (on, options) => {
               <Text> </Text>
               <Button key={`down-${i}`} label="↓" plain dimColor onPress={() => move($, i, 1)} />
               <Text> </Text>
-              <Button key={`run-${i}`} label="▶" plain dimColor
-                onPress={() => void runAt($, i, item)} />
+              {item.kind === 'hold' ? <Text dimColor> </Text> : (
+                <Button key={`run-${i}`} label="▶" plain dimColor
+                  onPress={() => void runAt($, i, item)} />
+              )}
               <Text> </Text>
-              <Button key={`rm-${i}`} label="✕" plain dimColor onPress={() => removeAt($, i)} />
+              <Button key={`rm-${i}`} label="✕" plain dimColor onPress={() => void dropAt($, i)} />
             </Box>
           ))}
         </Box>
-        <Text dimColor>Edit an entry and press Enter to save; empty removes it. A leading / runs as a command. ▶ sends it now.</Text>
+        <Text dimColor>Edit an entry and press Enter to save; empty removes it. A leading / runs as a command. ▶ sends it now; holds start on their own.</Text>
       </Box>
     )
   })

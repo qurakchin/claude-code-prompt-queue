@@ -1,7 +1,12 @@
-/** A parked prompt: plain text, or a slash command run as if typed. */
+/**
+ * A parked entry: plain text, a slash command run as if typed, or a hold that
+ * gates everything after it for `ms` (and is counting down from `until`, when
+ * auto has reached it).
+ */
 export type QueueItem =
   | { kind: 'prompt'; text: string }
   | { kind: 'command'; command: string; args: string }
+  | { kind: 'hold'; ms: number; until?: number }
 
 export type QueueItems = QueueItem[]
 
