@@ -658,19 +658,24 @@ export const register: Register = (on, options) => {
     return ended
   })
 
-  // Built-in shortcuts (/queue-run, /queue-auto) and the commands an alias setting adds.
-  for (const [name, sub] of aliases.commands) {
-    on('command.run', { command: name }, async ($, e, next) => {
+  // /queue and every alias command (the built-in shortcuts and the ones a
+  // setting adds) share ONE registration, its matcher an any-of array. The
+  // module must keep exactly one `command.run` registration: the engine counts
+  // them and, with more than one, silently withholds the typed line from the
+  // prompt history (its tyt() gate): "/queue ..." and every alias line then
+  // stop being recalled by the up arrow, with no error anywhere. Adding another
+  // `on('command.run', ...)` here breaks that the same way.
+  on('command.run', { command: ['queue', ...aliases.commands.keys()] }, async ($, e, next) => {
+    if (e.command !== 'queue') {
+      const sub = aliases.commands.get(e.command)
       // A name that could not be registered belongs to someone else: answer
       // nothing of it and let the command it names run.
-      if (!registered.has(name)) return next(e)
+      if (sub === undefined || !registered.has(e.command)) return next(e)
       // The arguments go to the subcommand as typed; /queue itself would queue
       // ones the subcommand does not take as a prompt instead.
       return runSub($, sub, e.args.trim())
-    })
-  }
+    }
 
-  on('command.run', { command: 'queue' }, async ($, e) => {
     const args = e.args.trim()
     if (args === '') {
       await $.ui.open({ id: PANE, title: 'Queue', focus: true, closeOnEscape: true })
