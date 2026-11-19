@@ -87,11 +87,9 @@ const readAutoMode = (raw: unknown): AutoMode => {
 // `list=ls` adds /queue ls; `auto=/queue-auto` registers /queue-auto. Commas or newlines split.
 const readAliases = (raw: unknown): Aliases => {
   const words = new Map<string, Sub>()
-  // /queue-auto and /queue-run stay spellings of their subcommands, as they were before /queue auto.
-  const commands = new Map<string, Sub>([
-    ['queue-auto', 'auto'],
-    ['queue-run', 'run'],
-  ])
+  // No top-level command is registered unless the setting adds one: /queue is
+  // the only command this plugin holds by default.
+  const commands = new Map<string, Sub>()
   for (const entry of String(raw ?? '').split(/[,\n]+/)) {
     const found = entry.trim().match(/^([a-z]+)\s*=\s*(\S+)$/)
     if (!found) continue
@@ -486,7 +484,7 @@ const pick = async ($: Engine, arg: string) => {
   return { error: `No entry ${arg || '1'}. Queue has ${list.length}.` }
 }
 
-// /queue run [n] and /queue-run [n]: send entry n (default 1) now.
+// /queue run [n]: send entry n (default 1) now.
 const runNth = async ($: Engine, arg: string) => {
   const p = await pick($, arg)
   if ('error' in p) return { text: p.error }

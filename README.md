@@ -50,9 +50,7 @@ claude plugin uninstall prompt-queue@prompt-queue
 | `/queue run [n]` | Send entry n now (default 1). A hold sends nothing, so it is refused. |
 | `/queue drop <n>` | Remove entry n. |
 | `/queue clear` | Remove all entries. |
-| `/queue-run [n]` | Send the next entry now (or entry n). Same as `/queue run`. |
 | `/queue auto` | Toggle auto mode. With the default setting the choice lasts for this session. |
-| `/queue-auto` | The same toggle, under its old name. |
 | `/queue unblock` | Stop waiting on background jobs and holds. |
 
 **Auto mode** is off by default. When on, the next entry starts only after the current task ends **and** every background job or agent it started has finished. Then the next, until the queue is empty. Auto stays on until you toggle it off. Pressing Esc turns it off too. Whether `/queue auto`'s choice lasts past the session is up to the **Auto mode** setting.
@@ -111,7 +109,7 @@ The default keeps auto off and the toggle in this session, as before the setting
 list=ls, status=/qs, auto=/queue-auto
 ```
 
-With that, `/queue ls`, `/qs` and `/queue-auto` all work. `/queue auto` and `/queue run` are the default spellings; `/queue-auto` and `/queue-run` work without any alias setting, as they did before.
+With that, `/queue ls`, `/qs` and `/queue-auto` all work. `/queue` is the only command the plugin registers without this setting: the older top-level `/queue-auto` and `/queue-run` are gone, and `auto=/queue-auto, run=/queue-run` brings them back.
 
 An alias whose name is already taken (`/config`, another plugin's command) says so once and stays off for the session.
 
