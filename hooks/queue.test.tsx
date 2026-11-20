@@ -37,6 +37,32 @@ test('parks prompts and sends one on run', async ($, on) => {
   expect(empty.text).toBe('Queue is empty.')
 })
 
+test('a parked prompt is masked from the recorded command line', async ($, on) => {
+  // The typed line `/queue <text>` is recorded as a user turn whose
+  // `<command-args>` reaches the model; the parked text must not ride along
+  // before the entry is sent, so the hook masks the arguments on the way down.
+  const recorded: string[] = []
+  on('command.run', { command: 'queue' }, (_: any, e: any) => {
+    recorded.push(e.args)
+    return { text: '' }
+  })
+
+  await start($, on)
+  const queued = await $.command.run({ command: 'queue', args: 'ship the secret' })
+  expect(queued.text).toBe('Queued #1.')
+  expect(recorded).toEqual([''])
+
+  // A line refused for its leading slash is masked the same way.
+  await $.command.run({ command: 'queue', args: '/Users/me/x.md look at this' })
+  expect(recorded).toEqual(['', ''])
+
+  // The entry itself still holds the whole text, and the list command never
+  // passes anything down.
+  const list = await $.command.run({ command: 'queue', args: 'list' })
+  expect(list.text).toBe('1. ship the secret')
+  expect(recorded).toEqual(['', ''])
+})
+
 test('a leading slash parks a command and runs it as a command', async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []

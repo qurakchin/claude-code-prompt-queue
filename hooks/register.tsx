@@ -696,10 +696,22 @@ export const register: Register = (on, options) => {
     // A leading slash that names no command cannot be run or sent, so it is
     // refused now rather than dropped by a send that cannot work.
     const bad = badCommand(args)
-    if (bad) return { text: REFUSED(bad) }
+
+    // The typed line is recorded as a user turn whose `<command-args>` reaches
+    // the model, so a parked prompt would be read before its turn. `next` is
+    // how the engine's arguments are rewritten (masked); the entry itself was
+    // taken above and keeps the whole text. Nothing beneath is no failure: a
+    // test harness has no engine to answer, and masking must not undo parking.
+    const mask = () => next({ ...e, args: '' }).catch(() => undefined)
+
+    if (bad) {
+      await mask()
+      return { text: REFUSED(bad) }
+    }
 
     const list = await read($, items)
     await enqueue($, args)
+    await mask()
 
     return { text: `Queued #${list.length + 1}.` }
   })

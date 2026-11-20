@@ -53,6 +53,8 @@ claude plugin uninstall prompt-queue@prompt-queue
 | `/queue auto` | Toggle auto mode. With the default setting the choice lasts for this session. |
 | `/queue unblock` | Stop waiting on background jobs and holds. |
 
+A parked prompt does not reach the model until the queue sends it. Claude Code records the typed `/queue <text>` line as a user turn, so the plugin masks its arguments: the model reads `/queue` and `Queued #1.`, not the text, and the up-arrow history keeps `/queue` too. The panel shows entries to you alone; `/queue list` and `/queue status` print them, and a command's printed output is recorded for the model, so use the panel when the entries are sensitive.
+
 **Auto mode** is off by default. When on, the next entry starts only after the current task ends **and** every background job or agent it started has finished. Then the next, until the queue is empty. Auto stays on until you toggle it off. Pressing Esc turns it off too. Whether `/queue auto`'s choice lasts past the session is up to the **Auto mode** setting.
 
 `/queue status` prints the same state the panel shows, in one line plus the entries, and exits — no panel, no buttons:
