@@ -694,6 +694,56 @@ test('tool output that only quotes job words is not a job', async ($, on) => {
   expect(sent).toEqual(['a'])
 })
 
+test('a stopped job frees the queue without a notification', async ($, on) => {
+  // The engine sends no task notification for a job TaskStop ended, so the
+  // notice that clears `waiting` never comes; the stop's own record clears it.
+  const clock = mock.clock(on)
+  const sent: string[] = []
+  on('turn.complete', () => ({ text: '' }))
+  on('tool.call', { tool: 'Bash' }, () => ({
+    result: { stdout: '' },
+    text: 'Command running in background with ID: b123. Output is being written to: /x',
+  }))
+  on('tool.call', { tool: 'TaskStop' }, (_: any, e: any) =>
+    e.task_id === 'b777'
+      ? { result: { message: 'No task found with ID: b777' } }
+      : { result: { message: `Successfully stopped task: ${e.task_id}`, task_id: e.task_id, task_type: 'local_bash' } })
+  on('prompt.submit', ($, e) => {
+    sent.push(e.text)
+    return { text: e.text }
+  })
+  const endTurn = () =>
+    $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
+
+  const said = await start($, on)
+  for (const t of ['a', 'b']) await $.command.run({ command: 'queue', args: t })
+  await $.command.run({ command: 'queue', args: 'auto' })
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+
+  await $.tool.call({ tool: 'Bash', command: 'sleep 10', run_in_background: true })
+  await endTurn()
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+  expect(await said.run($, 'status')).toContain('waiting on 1 background job(s): b123')
+
+  // A record without an id, or one naming another task, leaves the wait in place.
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b777' })
+  await endTurn()
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b999' })
+  await endTurn()
+  await clock.advance(1)
+  expect(sent).toEqual(['a'])
+
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b123' })
+  await endTurn()
+  await clock.advance(1)
+  expect(sent).toEqual(['a', 'b'])
+  expect(await said.run($, 'status')).not.toContain('waiting on')
+})
+
 test('a prompt queued mid-task waits for the task to end', async ($, on) => {
   const clock = mock.clock(on)
   const sent: string[] = []

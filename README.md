@@ -94,7 +94,7 @@ Above the prompt, each queued entry shows on its own soft amber line, as `#1 <te
 
 The queue belongs to the current session.
 
-If auto keeps waiting on a job that already ended (for example one a subagent started), run `/queue unblock`; it also cancels any hold and lets the entries behind it go.
+A background job stopped with TaskStop stops holding the queue: the engine sends no task notification for a stopped job, so the stop's own result ends it. If auto keeps waiting on a job that already ended some other way (for example one a subagent started), run `/queue unblock`; it also cancels any hold and lets the entries behind it go.
 
 ## What the model can see
 

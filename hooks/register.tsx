@@ -36,6 +36,15 @@ const forgetEnded = async ($: Engine, text: string) => {
   if (ended.length) await update($, waiting, ids => ids.filter(one => !ended.includes(one)))
 }
 
+// The task a successful TaskStop ended. Its record names what was stopped, not
+// what was asked for (an agent may be stopped by name), and a stop that found
+// nothing answers an error, whose result is the error text and no id.
+const stoppedId = (ran: { isError?: boolean; result?: unknown }) => {
+  if (ran.isError) return undefined
+  const id = (ran.result as { task_id?: unknown } | undefined)?.task_id
+  return typeof id === 'string' ? id : undefined
+}
+
 const PANE = 'queue'
 
 const SUBCOMMANDS = ['help', 'list', 'status', 'run', 'drop', 'clear', 'unblock', 'auto', 'hold'] as const
@@ -635,6 +644,11 @@ export const register: Register = (on, options) => {
       e.tool === 'Bash' && e.run_in_background ? BASH_STARTED : e.tool === 'Agent' ? AGENT_STARTED : undefined
     const id = pattern && ran.text?.match(pattern)?.[1]
     if (id) await update($, waiting, ids => [...ids.filter(one => one !== id), id])
+
+    // TaskStop ends a job with no task notification, so nothing else would
+    // clear it and auto would wait on it forever: the stop's own record does.
+    const stopped = e.tool === 'TaskStop' ? stoppedId(ran) : undefined
+    if (stopped) await update($, waiting, ids => ids.filter(one => one !== stopped))
 
     return ran
   })
