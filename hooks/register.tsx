@@ -190,6 +190,15 @@ const badCommand = (text: string) => {
 
 const REFUSED = (token: string) => `${token} is not a command name, and a prompt cannot start with "/".`
 
+// The plugin answers the person, never the model. A `command.run` hook that
+// returns `text` makes the engine record the command echo and that output as a
+// user turn, which the model then reads — so the queue command answers nothing
+// and prints through `$.ui.log`, a transcript line the model never reads.
+const say = ($: Engine, text: string) => {
+  for (const line of text.split('\n')) if (line) $.ui.log(line)
+  return {}
+}
+
 // Refuses text that can never be queued, saying why in a toast.
 const refuse = ($: Engine, text: string) => {
   const bad = badCommand(text)
@@ -442,27 +451,31 @@ const parkHold = async ($: Engine, ms: number) => {
   return count + 1
 }
 
-const enqueue = async ($: Engine, text: string) => {
+// Parks what `text` names and answers the entry it parked, or nothing when a
+// hold's duration could not be read.
+const enqueue = async ($: Engine, text: string): Promise<QueueItem | undefined> => {
   const hold = text.trim().match(HOLD_TEXT)
   if (hold) {
     const ms = parseDuration(hold[1]!)
     if (ms === undefined) {
       $.ui.toast(holdRefusal(hold[1]!))
-      return
+      return undefined
     }
     await parkHold($, ms)
-    return
+    return { kind: 'hold', ms }
   }
-  await update($, items, list => [...list, parseEntry(text)])
+  const item = parseEntry(text)
+  await update($, items, list => [...list, item])
   await sendIfIdle($)
+  return item
 }
 
 // /queue hold <time> parks a wait, refusing a duration it cannot read.
 const enqueueHold = async ($: Engine, arg: string) => {
   const ms = parseDuration(arg)
-  if (ms === undefined) return { text: holdRefusal(arg) }
+  if (ms === undefined) return holdRefusal(arg)
   const at = await parkHold($, ms)
-  return { text: `Queued #${at}: hold ${formatDuration(ms)}.` }
+  return `Queued #${at}: hold ${formatDuration(ms)}.`
 }
 
 const runAt = async ($: Engine, i: number, item: QueueItem) => {
@@ -487,12 +500,12 @@ const pick = async ($: Engine, arg: string) => {
 // /queue run [n]: send entry n (default 1) now.
 const runNth = async ($: Engine, arg: string) => {
   const p = await pick($, arg)
-  if ('error' in p) return { text: p.error }
+  if ('error' in p) return p.error
   if (p.item.kind === 'hold') {
-    return { text: `${textOf(p.item)} sends nothing; it starts when auto reaches it. /queue drop ${p.i + 1} removes it.` }
+    return `${textOf(p.item)} sends nothing; it starts when auto reaches it. /queue drop ${p.i + 1} removes it.`
   }
   await runAt($, p.i, p.item)
-  return { text: `Sending: ${textOf(p.item)}` }
+  return `Sending: ${textOf(p.item)}`
 }
 
 // `global-*` keeps the toggle in settings; `session-*` leaves settings alone.
@@ -503,7 +516,7 @@ const toggleAuto = async ($: Engine) => {
 
   if (autoMode.scope === 'session') {
     if (isOn) await sendIfIdle($)
-    return { text }
+    return text
   }
 
   try {
@@ -516,7 +529,7 @@ const toggleAuto = async ($: Engine) => {
     // two from both sending.
     if (!saved.deny) {
       if (isOn) await sendIfIdle($)
-      return { text }
+      return text
     }
   } catch {
     // The write failed; the toggle still stands for this session.
@@ -524,25 +537,25 @@ const toggleAuto = async ($: Engine) => {
 
   $.ui.toast('Auto changed for this session only: the setting could not be saved.')
   if (isOn) await sendIfIdle($)
-  return { text }
+  return text
 }
 
-const runSub = async ($: Engine, sub: Sub, arg: string): Promise<{ text: string }> => {
-  if (sub === 'help') return { text: helpText() }
-  if (sub === 'status') return { text: await statusText($) }
-  if (sub === 'auto') return toggleAuto($)
-  if (sub === 'hold') return enqueueHold($, arg)
+const runSub = async ($: Engine, sub: Sub, arg: string) => {
+  if (sub === 'help') return say($, helpText())
+  if (sub === 'status') return say($, await statusText($))
+  if (sub === 'auto') return say($, await toggleAuto($))
+  if (sub === 'hold') return say($, await enqueueHold($, arg))
 
   const list = await read($, items)
 
   if (sub === 'list') {
-    return { text: list.map((item, i) => `${i + 1}. ${textOf(item)}`).join('\n') || 'Queue is empty.' }
+    return say($, list.map((item, i) => `${i + 1}. ${textOf(item)}`).join('\n') || 'Queue is empty.')
   }
 
   if (sub === 'clear') {
     disarmHold()
     await update($, items, () => [])
-    return { text: `Cleared ${list.length} prompt(s).` }
+    return say($, `Cleared ${list.length} prompt(s).`)
   }
 
   if (sub === 'unblock') {
@@ -550,15 +563,15 @@ const runSub = async ($: Engine, sub: Sub, arg: string): Promise<{ text: string 
     await update($, waiting, () => [])
     await update($, items, entries => entries.filter(item => item.kind !== 'hold'))
     await sendIfIdle($)
-    return { text: 'Stopped waiting on background jobs and holds.' }
+    return say($, 'Stopped waiting on background jobs and holds.')
   }
 
-  if (sub === 'run') return runNth($, arg)
+  if (sub === 'run') return say($, await runNth($, arg))
 
   const p = await pick($, arg)
-  if ('error' in p) return { text: p.error }
+  if ('error' in p) return say($, p.error)
   await dropAt($, p.i)
-  return { text: `Dropped: ${textOf(p.item)}` }
+  return say($, `Dropped: ${textOf(p.item)}`)
 }
 
 export const register: Register = (on, options) => {
@@ -677,7 +690,7 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
     if (args === '') {
       await $.ui.open({ id: PANE, title: 'Queue', focus: true, closeOnEscape: true })
-      return { text: 'Queue panel opened.' }
+      return {}
     }
 
     // A subcommand matches only in its own form, so "/queue list the files" is queued.
@@ -697,23 +710,19 @@ export const register: Register = (on, options) => {
     // refused now rather than dropped by a send that cannot work.
     const bad = badCommand(args)
 
-    // The typed line is recorded as a user turn whose `<command-args>` reaches
-    // the model, so a parked prompt would be read before its turn. `next` is
-    // how the engine's arguments are rewritten (masked); the entry itself was
-    // taken above and keeps the whole text. Nothing beneath is no failure: a
-    // test harness has no engine to answer, and masking must not undo parking.
-    const mask = () => next({ ...e, args: '' }).catch(() => undefined)
-
-    if (bad) {
-      await mask()
-      return { text: REFUSED(bad) }
-    }
+    // Answering no `text` is what keeps the run out of the model's context: the
+    // engine records the command echo and the hook's text as a user turn, so
+    // either one would be read on the next request. The person's answer goes
+    // through `say` instead, and the typed line stays whole in the history.
+    if (bad) return say($, REFUSED(bad))
 
     const list = await read($, items)
-    await enqueue($, args)
-    await mask()
+    const item = await enqueue($, args)
+    if (item === undefined) return {}
 
-    return { text: `Queued #${list.length + 1}.` }
+    // The notice carries the entry's text: it is the person's transcript, and
+    // the one place the entry can be read back before it is sent.
+    return say($, `Queued #${list.length + 1}: ${firstLine(textOf(item), 60)}`)
   })
 
   // Above the prompt: each queued prompt on its own line, then the dim state row,

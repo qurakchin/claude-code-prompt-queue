@@ -1,11 +1,32 @@
 import { test, expect, mock } from 'claude-code/testing'
 
+// The plugin answers the person through `$.ui.log`, a transcript line the model
+// never reads, and returns no `text` (which the engine would record for the model).
+const answers = (on: any) => {
+  const lines: string[] = []
+  on('ui.log', (_: any, e: any) => {
+    lines.push(e.text)
+    return { value: undefined }
+  })
+  return {
+    lines,
+    // Runs one command and answers the lines it printed.
+    run: async ($: any, args: string, command = 'queue') => {
+      lines.length = 0
+      await $.command.run({ command, args })
+      return lines.join('\n')
+    },
+  }
+}
+
 // A test registers its hooks before its first call on $, which loads the plugin:
 // these two stand for the engine beneath it, and raise the session's start.
 const start = async ($: any, on: any) => {
+  const said = answers(on)
   on('command.register', (_: any, e: any) => ({ value: e.name }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  return said
 }
 
 test('parks prompts and sends one on run', async ($, on) => {
@@ -16,13 +37,12 @@ test('parks prompts and sends one on run', async ($, on) => {
     return { text: e.text }
   })
 
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: 'first task' })
   await $.command.run({ command: 'queue', args: 'second task' })
   expect(sent).toEqual([])
 
-  const list = await $.command.run({ command: 'queue', args: 'list' })
-  expect(list.text).toBe('1. first task\n2. second task')
+  expect(await said.run($, 'list')).toBe('1. first task\n2. second task')
 
   await $.command.run({ command: 'queue', args: 'run' })
   await clock.advance(1)
@@ -30,37 +50,52 @@ test('parks prompts and sends one on run', async ($, on) => {
 
   await $.command.run({ command: 'queue', args: 'drop 1' })
   await $.command.run({ command: 'queue', args: 'list the files' })
-  const parked = await $.command.run({ command: 'queue', args: 'list' })
-  expect(parked.text).toBe('1. list the files')
+  expect(await said.run($, 'list')).toBe('1. list the files')
   await $.command.run({ command: 'queue', args: 'clear' })
-  const empty = await $.command.run({ command: 'queue', args: 'list' })
-  expect(empty.text).toBe('Queue is empty.')
+  expect(await said.run($, 'list')).toBe('Queue is empty.')
 })
 
-test('a parked prompt is masked from the recorded command line', async ($, on) => {
-  // The typed line `/queue <text>` is recorded as a user turn whose
-  // `<command-args>` reaches the model; the parked text must not ride along
-  // before the entry is sent, so the hook masks the arguments on the way down.
-  const recorded: string[] = []
+test('no command path answers the model', async ($, on) => {
+  // A `command.run` hook that returns `text` makes the engine record the command
+  // echo, arguments included, and that text as a user turn the model reads. So
+  // the parked text would reach the model before it is delivered, and so would
+  // `list`. Every path answers nothing, prints through `$.ui.log`, and never
+  // passes the line down.
+  const beneath: string[] = []
   on('command.run', { command: 'queue' }, (_: any, e: any) => {
-    recorded.push(e.args)
-    return { text: '' }
+    beneath.push(e.args)
+    return { text: 'beneath' }
   })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const said = answers(on)
 
-  await start($, on)
-  const queued = await $.command.run({ command: 'queue', args: 'ship the secret' })
-  expect(queued.text).toBe('Queued #1.')
-  expect(recorded).toEqual([''])
+  expect((await $.command.run({ command: 'queue', args: 'ship the secret' })).text).toBeUndefined()
+  expect(said.lines).toEqual(['Queued #1: ship the secret'])
 
-  // A line refused for its leading slash is masked the same way.
-  await $.command.run({ command: 'queue', args: '/Users/me/x.md look at this' })
-  expect(recorded).toEqual(['', ''])
+  said.lines.length = 0
+  expect((await $.command.run({ command: 'queue', args: '/Users/me/x.md look at this' })).text).toBeUndefined()
+  expect(said.lines).toEqual(['/Users/me/x.md is not a command name, and a prompt cannot start with "/".'])
 
-  // The entry itself still holds the whole text, and the list command never
-  // passes anything down.
-  const list = await $.command.run({ command: 'queue', args: 'list' })
-  expect(list.text).toBe('1. ship the secret')
-  expect(recorded).toEqual(['', ''])
+  expect(await said.run($, 'list')).toBe('1. ship the secret')
+  expect(await said.run($, 'status')).toBe('1 queued · auto off (session)\n1. ship the secret')
+  expect(await said.run($, '')).toBe('')
+  expect(await said.run($, 'help')).toContain('/queue <text>')
+  expect(await said.run($, 'run 9')).toBe('No entry 9. Queue has 1.')
+  expect(await said.run($, 'drop 1')).toBe('Dropped: ship the secret')
+  expect(await said.run($, 'unblock')).toBe('Stopped waiting on background jobs and holds.')
+  expect(await said.run($, 'auto')).toBe('Queue auto is on (session).')
+
+  // Nothing beneath ran with the line, masked or whole.
+  expect(beneath).toEqual([])
+})
+
+test('the queued notice carries the entry text', async ($, on) => {
+  // The notice is the person's transcript, not the model's context: it names
+  // what was parked so the entry can be read back before it is sent.
+  const said = await start($, on)
+  expect(await said.run($, 'fix the failing tests')).toBe('Queued #1: fix the failing tests')
+  expect(await said.run($, '/review-pr 123')).toBe('Queued #2: /review-pr 123')
+  expect(await said.run($, 'x'.repeat(80))).toBe(`Queued #3: ${'x'.repeat(59)}…`)
 })
 
 test('a leading slash parks a command and runs it as a command', async ($, on) => {
@@ -78,7 +113,7 @@ test('a leading slash parks a command and runs it as a command', async ($, on) =
     return { text: 'reviewed' }
   })
 
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: '/review-pr 123' })
   await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
@@ -87,8 +122,7 @@ test('a leading slash parks a command and runs it as a command', async ($, on) =
 
   await $.turn.start({ turnId: 't' } as never)
   await $.command.run({ command: 'queue', args: '/review-pr 456' })
-  const list = await $.command.run({ command: 'queue', args: 'list' })
-  expect(list.text).toBe('1. /review-pr 456')
+  expect(await said.run($, 'list')).toBe('1. /review-pr 456')
 
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
   await clock.advance(1)
@@ -179,7 +213,7 @@ test('auto sends all prompts one by one and stays on', async ($, on) => {
 })
 
 test('hold reads plain durations and refuses anything else', async ($, on) => {
-  await start($, on)
+  const said = await start($, on)
   const cases: [string, string][] = [
     ['1h', '1h'],
     ['1hour', '1h'],
@@ -191,21 +225,17 @@ test('hold reads plain durations and refuses anything else', async ($, on) => {
     ['1h30m', '1h30m'],
   ]
   for (const [i, [arg, shown]] of cases.entries()) {
-    const out = await $.command.run({ command: 'queue', args: `hold ${arg}` })
-    expect(out.text).toBe(`Queued #${i + 1}: hold ${shown}.`)
+    expect(await said.run($, `hold ${arg}`)).toBe(`Queued #${i + 1}: hold ${shown}.`)
   }
 
-  const bad = await $.command.run({ command: 'queue', args: 'hold 1x' })
-  expect(bad.text).toBe('"1x" is not a duration. Use a duration like 30m, 1h, 0.5h, 1 hour or 1h30m.')
-  const empty = await $.command.run({ command: 'queue', args: 'hold' })
-  expect(empty.text).toBe('hold needs a duration. Use a duration like 30m, 1h, 0.5h, 1 hour or 1h30m.')
+  expect(await said.run($, 'hold 1x')).toBe('"1x" is not a duration. Use a duration like 30m, 1h, 0.5h, 1 hour or 1h30m.')
+  expect(await said.run($, 'hold')).toBe('hold needs a duration. Use a duration like 30m, 1h, 0.5h, 1 hour or 1h30m.')
   for (const junk of ['1', '-1h', '0h', '1h junk', '1hh', '1.5x']) {
-    const out = await $.command.run({ command: 'queue', args: `hold ${junk}` })
-    expect(out.text).toContain(`"${junk}" is not a duration.`)
+    expect(await said.run($, `hold ${junk}`)).toContain(`"${junk}" is not a duration.`)
   }
 
   // Nothing refused was parked.
-  expect((await $.command.run({ command: 'queue', args: 'list' })).text.split('\n')).toHaveLength(cases.length)
+  expect((await said.run($, 'list')).split('\n')).toHaveLength(cases.length)
 })
 
 test('auto sends a and c with an hour between them', async ($, on) => {
@@ -230,7 +260,7 @@ test('auto sends a and c with an hour between them', async ($, on) => {
   const endTurn = () =>
     $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
 
-  await start($, on)
+  const said = await start($, on)
   for (const args of ['a', 'hold 1h', 'c']) await $.command.run({ command: 'queue', args })
   await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
@@ -241,9 +271,8 @@ test('auto sends a and c with an hour between them', async ($, on) => {
   await clock.advance(1)
   expect(sent).toEqual(['a'])
   expect(await band(/hold until \d\d:\d\d/)).toBe(true)
-  const status = await $.command.run({ command: 'queue', args: 'status' })
-  expect(status.text).toMatch(/1\. hold 1h · until \d\d:\d\d · 1h left/)
-  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('1. hold 1h\n2. c')
+  expect(await said.run($, 'status')).toMatch(/1\. hold 1h · until \d\d:\d\d · 1h left/)
+  expect(await said.run($, 'list')).toBe('1. hold 1h\n2. c')
 
   await clock.advance(3600000 - 2)
   expect(sent).toEqual(['a'])
@@ -263,7 +292,7 @@ test('dropping the hold lets what follows go', async ($, on) => {
   const endTurn = () =>
     $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
 
-  await start($, on)
+  const said = await start($, on)
   for (const args of ['a', 'hold 1h', 'c']) await $.command.run({ command: 'queue', args })
   await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
@@ -271,8 +300,7 @@ test('dropping the hold lets what follows go', async ($, on) => {
   await clock.advance(1)
   expect(sent).toEqual(['a'])
 
-  const dropped = await $.command.run({ command: 'queue', args: 'drop 1' })
-  expect(dropped.text).toBe('Dropped: hold 1h')
+  expect(await said.run($, 'drop 1')).toBe('Dropped: hold 1h')
   await clock.advance(1)
   expect(sent).toEqual(['a', 'c'])
 })
@@ -285,24 +313,22 @@ test('unblock clears background jobs and holds alike', async ($, on) => {
     return { text: e.text }
   })
 
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: 'hold 30m' })
   await $.command.run({ command: 'queue', args: 'after' })
   await $.command.run({ command: 'queue', args: 'auto' })
-  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('1. hold 30m\n2. after')
+  expect(await said.run($, 'list')).toBe('1. hold 30m\n2. after')
 
-  const out = await $.command.run({ command: 'queue', args: 'unblock' })
-  expect(out.text).toBe('Stopped waiting on background jobs and holds.')
+  expect(await said.run($, 'unblock')).toBe('Stopped waiting on background jobs and holds.')
   await clock.advance(1)
   expect(sent).toEqual(['after'])
 })
 
 test('run refuses a hold, which sends nothing', async ($, on) => {
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: 'hold 30m' })
-  const out = await $.command.run({ command: 'queue', args: 'run 1' })
-  expect(out.text).toBe('hold 30m sends nothing; it starts when auto reaches it. /queue drop 1 removes it.')
-  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('1. hold 30m')
+  expect(await said.run($, 'run 1')).toBe('hold 30m sends nothing; it starts when auto reaches it. /queue drop 1 removes it.')
+  expect(await said.run($, 'list')).toBe('1. hold 30m')
 })
 
 test('a reload re-arms the hold clock instead of restarting it', async ($, on) => {
@@ -343,12 +369,12 @@ test('panel edits a hold by its duration and refuses a bad one', async ($, on) =
     return { value: undefined }
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: 'hold 1h' })
   await $.command.run({ command: 'queue', args: '' })
   const ui = await $.ui.mount({ plugin: 'prompt-queue', surface: 'terminal', component: 'Pane', requestId: 'queue',
     props: { title: 'Queue', isFocused: true, bodyColumns: 100, placement: 'dock' } } as any)
-  const list = async () => (await $.command.run({ command: 'queue', args: 'list' })).text
+  const list = () => said.run($, 'list')
 
   await ui.input({ key: 'edit-0', text: '2h' })
   expect(await list()).toBe('1. hold 2h')
@@ -377,7 +403,7 @@ test('toggling auto on mid-task waits for the task to end', async ($, on) => {
     return { text: e.text }
   })
 
-  await start($, on)
+  const said = await start($, on)
   await $.turn.start({ turnId: 't' } as never)
   await $.command.run({ command: 'queue', args: 'a' })
   await $.command.run({ command: 'queue', args: 'auto' })
@@ -388,8 +414,7 @@ test('toggling auto on mid-task waits for the task to end', async ($, on) => {
   await clock.advance(1)
   expect(sent).toEqual(['a'])
 
-  const off = await $.command.run({ command: 'queue', args: 'auto' })
-  expect(off.text).toBe('Queue auto is off (session).')
+  expect(await said.run($, 'auto')).toBe('Queue auto is off (session).')
 })
 
 test('the auto setting starts the session', { options: { autoMode: 'session-true' } }, async ($, on) => {
@@ -419,14 +444,12 @@ test('session auto keeps the toggle in the session', { options: { autoMode: 'ses
     return { text: e.text }
   })
 
-  await start($, on)
-  const off = await $.command.run({ command: 'queue', args: 'auto' })
-  expect(off.text).toBe('Queue auto is off (session).')
+  const said = await start($, on)
+  expect(await said.run($, 'auto')).toBe('Queue auto is off (session).')
   expect(saved).toEqual([])
 
   await $.command.run({ command: 'queue', args: 'a' })
-  const turnedOn = await $.command.run({ command: 'queue', args: 'auto' })
-  expect(turnedOn.text).toBe('Queue auto is on (session).')
+  expect(await said.run($, 'auto')).toBe('Queue auto is on (session).')
   await clock.advance(1)
   expect(sent).toEqual(['a'])
   expect(saved).toEqual([])
@@ -439,13 +462,11 @@ test('global auto writes the choice back to settings', { options: { autoMode: 'g
     return { value: e.value }
   })
 
-  await start($, on)
-  const turnedOn = await $.command.run({ command: 'queue', args: 'auto' })
-  expect(turnedOn.text).toBe('Queue auto is on (global).')
+  const said = await start($, on)
+  expect(await said.run($, 'auto')).toBe('Queue auto is on (global).')
   expect(saved).toEqual(['prompt-queue.autoMode=global-true'])
 
-  const turnedOff = await $.command.run({ command: 'queue', args: 'auto' })
-  expect(turnedOff.text).toBe('Queue auto is off (global).')
+  expect(await said.run($, 'auto')).toBe('Queue auto is off (global).')
   expect(saved).toEqual(['prompt-queue.autoMode=global-true', 'prompt-queue.autoMode=global-false'])
 })
 
@@ -489,14 +510,12 @@ test('a setting that cannot be saved leaves the toggle to the session', { option
     return { text: e.text }
   })
 
-  await start($, on)
-  const off = await $.command.run({ command: 'queue', args: 'auto' })
-  expect(off.text).toBe('Queue auto is off (global).')
+  const said = await start($, on)
+  expect(await said.run($, 'auto')).toBe('Queue auto is off (global).')
 
   await $.command.run({ command: 'queue', args: 'a' })
   how = 'deny'
-  const back = await $.command.run({ command: 'queue', args: 'auto' })
-  expect(back.text).toBe('Queue auto is on (global).')
+  expect(await said.run($, 'auto')).toBe('Queue auto is on (global).')
   expect(toasts).toEqual([
     'Auto changed for this session only: the setting could not be saved.',
     'Auto changed for this session only: the setting could not be saved.',
@@ -526,17 +545,14 @@ test('aliases move subcommands to /queue words or top-level commands', { options
     return { text: e.text }
   })
 
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: 'one' })
-  const listed = await $.command.run({ command: 'queue', args: 'ls' })
-  expect(listed.text).toBe('1. one')
+  expect(await said.run($, 'ls')).toBe('1. one')
 
-  const status = await $.command.run({ command: 'qs', args: '' })
-  expect(status.text).toBe('1 queued · auto off (session)\n1. one')
+  expect(await said.run($, '', 'qs')).toBe('1 queued · auto off (session)\n1. one')
 
   // Turning auto on sends what is parked.
-  const toggled = await $.command.run({ command: 'queue', args: 'auto' })
-  expect(toggled.text).toBe('Queue auto is on (session).')
+  expect(await said.run($, 'auto')).toBe('Queue auto is on (session).')
   await clock.advance(1)
   expect(sent).toEqual(['one'])
 })
@@ -567,18 +583,16 @@ test('a taken alias says so and leaves its name to its owner', { options: { alia
 })
 
 test('an alias refuses arguments the subcommand does not take', { options: { aliases: 'run=/qr' } }, async ($, on) => {
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: 'a' })
 
-  const junk = await $.command.run({ command: 'qr', args: '1 junk' })
-  expect(junk.text).toBe('No entry 1 junk. Queue has 1.')
-  const one = await $.command.run({ command: 'qr', args: '1' })
-  expect(one.text).toBe('Sending: a')
+  expect(await said.run($, '1 junk', 'qr')).toBe('No entry 1 junk. Queue has 1.')
+  expect(await said.run($, '1', 'qr')).toBe('Sending: a')
 })
 
 test('help lists the aliases', { options: { aliases: 'list=ls, status=/qs' } }, async ($, on) => {
-  await start($, on)
-  const help = (await $.command.run({ command: 'queue', args: 'help' })).text
+  const said = await start($, on)
+  const help = await said.run($, 'help')
   expect(help).toContain('/queue ls')
   expect(help).toContain('/qs')
   expect(help).not.toContain('/queue-auto')
@@ -714,12 +728,11 @@ test('a failed send keeps the prompt and stops auto', async ($, on) => {
     return { text: e.text }
   })
 
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: 'a' })
   await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
-  const kept = await $.command.run({ command: 'queue', args: 'list' })
-  expect(kept.text).toBe('1. a')
+  expect(await said.run($, 'list')).toBe('1. a')
   expect(toasts).toEqual(['Queue paused: could not send "a". /queue auto resumes.'])
 
   // Auto stopped on its own; turning it back on sends what was kept.
@@ -744,19 +757,19 @@ test('a prompt a hook drops stays in the queue and stops auto', async ($, on) =>
     return { text: e.text }
   })
 
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: 'a' })
   await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
   // A drop starts no turn, so the send has to clear its own flags.
   expect(toasts).toEqual(['Queue paused: could not send "a": blocked by policy. /queue auto resumes.'])
-  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('1. a')
+  expect(await said.run($, 'list')).toBe('1. a')
 
   dropped = false
   await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
   expect(sent).toEqual(['a'])
-  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('Queue is empty.')
+  expect(await said.run($, 'list')).toBe('Queue is empty.')
 })
 
 test('a command that cannot run leaves the queue and the next prompt goes', async ($, on) => {
@@ -775,13 +788,12 @@ test('a command that cannot run leaves the queue and the next prompt goes', asyn
     return { text: e.text }
   })
 
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: '/bad-command' })
   await $.command.run({ command: 'queue', args: 'auto' })
   await clock.advance(1)
   expect(toasts).toEqual(['Could not run "/bad-command". It was removed from the queue.'])
-  const empty = await $.command.run({ command: 'queue', args: 'list' })
-  expect(empty.text).toBe('Queue is empty.')
+  expect(await said.run($, 'list')).toBe('Queue is empty.')
 
   await $.command.run({ command: 'queue', args: '你好' })
   await clock.advance(1)
@@ -789,12 +801,10 @@ test('a command that cannot run leaves the queue and the next prompt goes', asyn
 })
 
 test('a leading slash that names no command is refused when queued', async ($, on) => {
-  const out = await $.command.run({ command: 'queue', args: '/Users/me/x.md 看一下这个文件' })
-  expect(out.text).toBe('/Users/me/x.md is not a command name, and a prompt cannot start with "/".')
-  const bare = await $.command.run({ command: 'queue', args: '/' })
-  expect(bare.text).toBe('/ is not a command name, and a prompt cannot start with "/".')
-  const list = await $.command.run({ command: 'queue', args: 'list' })
-  expect(list.text).toBe('Queue is empty.')
+  const said = answers(on)
+  expect(await said.run($, '/Users/me/x.md 看一下这个文件')).toBe('/Users/me/x.md is not a command name, and a prompt cannot start with "/".')
+  expect(await said.run($, '/')).toBe('/ is not a command name, and a prompt cannot start with "/".')
+  expect(await said.run($, 'list')).toBe('Queue is empty.')
 })
 
 test('auto clears agents whose end arrives in another session message', async ($, on) => {
@@ -852,11 +862,13 @@ test('panel edits, reorders, runs and removes; state shows above the prompt', as
     await h.unmount()
     return !!found
   }
-  const list = async () => (await $.command.run({ command: 'queue', args: 'list' })).text
+  const said = answers(on)
+  const list = () => said.run($, 'list')
 
   expect(await band(/queued/)).toBe(false)
   for (const t of ['a', 'b', 'c']) await $.command.run({ command: 'queue', args: t })
-  expect((await $.command.run({ command: 'queue', args: '' })).text).toBe('Queue panel opened.')
+  // Opening the panel answers nothing: the panel itself is what the person sees.
+  expect((await $.command.run({ command: 'queue', args: '' })).text).toBeUndefined()
   expect(await band(/^a$/)).toBe(true)
   expect(await band(/^c$/)).toBe(true)
 
@@ -885,13 +897,13 @@ test('/queue run sends the next entry', async ($, on) => {
     sent.push(e.text)
     return { text: e.text }
   })
-  await start($, on)
+  const said = await start($, on)
   for (const t of ['a', 'b']) await $.command.run({ command: 'queue', args: t })
-  expect((await $.command.run({ command: 'queue', args: 'run' })).text).toBe('Sending: a')
+  expect(await said.run($, 'run')).toBe('Sending: a')
   await clock.advance(1)
   expect(sent).toEqual(['a'])
-  expect((await $.command.run({ command: 'queue', args: 'list' })).text).toBe('1. b')
-  expect((await $.command.run({ command: 'queue', args: 'run 9' })).text).toBe('No entry 9. Queue has 1.')
+  expect(await said.run($, 'list')).toBe('1. b')
+  expect(await said.run($, 'run 9')).toBe('No entry 9. Queue has 1.')
 })
 
 test('the band draws nothing with auto on and the queue empty', async ($, on) => {
@@ -932,10 +944,9 @@ test('commands carry the argument hint the typeahead shows', { options: { aliase
 })
 
 test('status prints the queue without the panel', async ($, on) => {
-  await start($, on)
+  const said = await start($, on)
   for (const t of ['a', '/review-pr 2']) await $.command.run({ command: 'queue', args: t })
-  const status = await $.command.run({ command: 'queue', args: 'status' })
-  expect(status.text).toBe('2 queued · auto off (session)\n1. a\n2. /review-pr 2')
+  expect(await said.run($, 'status')).toBe('2 queued · auto off (session)\n1. a\n2. /review-pr 2')
 })
 
 test('the panel refuses a leading slash that names no command', async ($, on) => {
@@ -945,12 +956,12 @@ test('the panel refuses a leading slash that names no command', async ($, on) =>
     return { value: undefined }
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  await start($, on)
+  const said = await start($, on)
   await $.command.run({ command: 'queue', args: 'keep' })
   await $.command.run({ command: 'queue', args: '' })
   const ui = await $.ui.mount({ plugin: 'prompt-queue', surface: 'terminal', component: 'Pane', requestId: 'queue',
     props: { title: 'Queue', isFocused: true, bodyColumns: 100, placement: 'dock' } } as any)
-  const list = async () => (await $.command.run({ command: 'queue', args: 'list' })).text
+  const list = () => said.run($, 'list')
   const refused = '/Users/me/x.md is not a command name, and a prompt cannot start with "/".'
 
   await ui.input({ key: 'new', text: '/Users/me/x.md look at this' })
